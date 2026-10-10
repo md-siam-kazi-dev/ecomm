@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -67,7 +68,34 @@ type ReviewDTO struct {
 	Comment            string `json:"comment"`
 	IsVerifiedPurchase bool   `json:"is_verified_purchase"`
 	HelpfulCount       int64  `json:"helpful_count"`
+	VendorReply        string `json:"vendor_reply,omitempty"`
+	VendorRepliedAt    string `json:"vendor_replied_at,omitempty"`
 	CreatedAt          string `json:"created_at"`
+}
+
+// RatingSummaryDTO is a product's published-review rating aggregate.
+type RatingSummaryDTO struct {
+	Average      float64          `json:"average"`
+	Total        int64            `json:"total"`
+	Distribution map[string]int64 `json:"distribution"`
+}
+
+// AnswerDTO is a public answer to a product question.
+type AnswerDTO struct {
+	ID                     string `json:"id"`
+	Answer                 string `json:"answer"`
+	IsOfficialVendorAnswer bool   `json:"is_official_vendor_answer"`
+	Author                 string `json:"author"`
+	CreatedAt              string `json:"created_at"`
+}
+
+// QuestionDTO is a published product question with its public answers.
+type QuestionDTO struct {
+	ID        string      `json:"id"`
+	Question  string      `json:"question"`
+	Author    string      `json:"author"`
+	CreatedAt string      `json:"created_at"`
+	Answers   []AnswerDTO `json:"answers"`
 }
 
 func toProductDTO(r ProductRecord) ProductDTO {
@@ -142,7 +170,7 @@ func toCategoryDTO(r CategoryRecord) CategoryDTO {
 }
 
 func toReviewDTO(r ReviewRecord) ReviewDTO {
-	return ReviewDTO{
+	dto := ReviewDTO{
 		ID:                 r.ID,
 		ProductID:          r.ProductID,
 		ProductName:        r.ProductName,
@@ -153,6 +181,47 @@ func toReviewDTO(r ReviewRecord) ReviewDTO {
 		Comment:            r.Comment,
 		IsVerifiedPurchase: r.VerifiedPurchase,
 		HelpfulCount:       r.HelpfulCount,
+		VendorReply:        r.VendorReply,
 		CreatedAt:          r.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if r.VendorRepliedAt != nil {
+		dto.VendorRepliedAt = r.VendorRepliedAt.UTC().Format(time.RFC3339)
+	}
+	return dto
+}
+
+func toRatingSummaryDTO(r RatingSummaryRecord) RatingSummaryDTO {
+	distribution := map[string]int64{"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
+	var weighted int64
+	for i, count := range r.Distribution {
+		stars := i + 1
+		distribution[strconv.Itoa(stars)] = count
+		weighted += int64(stars) * count
+	}
+
+	var average float64
+	if r.Total > 0 {
+		average = float64(weighted) / float64(r.Total)
+	}
+	return RatingSummaryDTO{Average: average, Total: r.Total, Distribution: distribution}
+}
+
+func toQuestionDTO(q QuestionRecord) QuestionDTO {
+	answers := make([]AnswerDTO, 0, len(q.Answers))
+	for _, a := range q.Answers {
+		answers = append(answers, AnswerDTO{
+			ID:                     a.ID,
+			Answer:                 a.Answer,
+			IsOfficialVendorAnswer: a.IsOfficialVendorAnswer,
+			Author:                 a.Author,
+			CreatedAt:              a.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return QuestionDTO{
+		ID:        q.ID,
+		Question:  q.Question,
+		Author:    q.Author,
+		CreatedAt: q.CreatedAt.UTC().Format(time.RFC3339),
+		Answers:   answers,
 	}
 }

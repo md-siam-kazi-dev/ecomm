@@ -18,7 +18,15 @@ type Config struct {
 	Auth     AuthConfig
 	Images   ImageConfig
 	Payment  PaymentConfig
+	Order    OrderConfig
 	Log      LogConfig
+}
+
+// OrderConfig holds storefront order pricing (flat rates, no per-product tax).
+type OrderConfig struct {
+	StandardShipping      float64
+	ExpressShipping       float64
+	FreeShippingThreshold float64
 }
 
 // PaymentConfig configures the application-fee workflow. No real provider is
@@ -36,6 +44,8 @@ type PaymentConfig struct {
 	ApplicationFeeAmount string
 	// ApplicationFeeCurrency is an ISO-4217 code, e.g. "BDT".
 	ApplicationFeeCurrency string
+	// Currency is the default order currency, e.g. "usd".
+	Currency string
 }
 
 // ImageConfig configures third-party image hosting (profile pictures).
@@ -162,6 +172,12 @@ func Load() (*Config, error) {
 			ApplicationFeeEnabled:  getEnvBool("APPLICATION_FEE_ENABLED", false),
 			ApplicationFeeAmount:   getEnv("APPLICATION_FEE_AMOUNT", "0.00"),
 			ApplicationFeeCurrency: getEnv("APPLICATION_FEE_CURRENCY", "BDT"),
+			Currency:               getEnv("PAYMENT_CURRENCY", "usd"),
+		},
+		Order: OrderConfig{
+			StandardShipping:      getEnvFloat("ORDER_STANDARD_SHIPPING", 5.99),
+			ExpressShipping:       getEnvFloat("ORDER_EXPRESS_SHIPPING", 12.99),
+			FreeShippingThreshold: getEnvFloat("ORDER_FREE_SHIPPING_THRESHOLD", 75),
 		},
 		Log: LogConfig{
 			Level: getEnv("LOG_LEVEL", "info"),
@@ -239,6 +255,15 @@ func getEnvInt(key string, fallback int) int {
 func getEnvInt64(key string, fallback int64) int64 {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func getEnvFloat(key string, fallback float64) float64 {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		if parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
 			return parsed
 		}
 	}

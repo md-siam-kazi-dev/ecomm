@@ -16,6 +16,8 @@ func mount(r chi.Router, h *Handler) {
 	r.Get("/products", h.ListProducts)
 	r.Get("/products/{slug}", h.GetProduct)
 	r.Get("/products/{slug}/reviews", h.ListReviews)
+	r.Get("/products/{slug}/rating", h.Rating)
+	r.Get("/products/{slug}/questions", h.Questions)
 	r.Get("/products/{slug}/related", h.Related)
 	r.Get("/categories", h.ListCategories)
 	r.Get("/reviews/top", h.TopReviews)

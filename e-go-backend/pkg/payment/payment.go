@@ -7,6 +7,7 @@ package payment
 import (
 	"context"
 	"errors"
+	"strings"
 )
 
 // ErrNotConfigured is returned when the platform has no real payment provider
@@ -19,11 +20,15 @@ var ErrNotConfigured = errors.New("payment: no payment provider is configured")
 var ErrUnknownProvider = errors.New("payment: unknown provider")
 
 // InitRequest starts a payment. Amount is a decimal string (never a float).
+// SuccessURL/CancelURL optionally override the provider defaults (used to send
+// the customer back to a specific order).
 type InitRequest struct {
-	Reference string
-	Amount    string
-	Currency  string
-	Metadata  map[string]string
+	Reference  string
+	Amount     string
+	Currency   string
+	Metadata   map[string]string
+	SuccessURL string
+	CancelURL  string
 }
 
 // InitResult is what a provider returns when a payment session is created.
@@ -102,13 +107,25 @@ func (r *Registry) Get(name string) (Provider, error) {
 	return nil, ErrUnknownProvider
 }
 
+// Config carries the payment-provider wiring from application configuration.
+type Config struct {
+	Provider      string
+	SecretKey     string
+	WebhookSecret string
+	Currency      string
+	SuccessURL    string
+	CancelURL     string
+}
+
 // NewRegistryFromConfig builds the registry from configuration. Real providers
-// are registered here as they are implemented; until then any configured name
-// resolves to ErrUnknownProvider (surfaced as "not configured" by callers).
-func NewRegistryFromConfig(providerName, providerKey, webhookSecret string) *Registry {
+// are registered here; an unconfigured name resolves to ErrUnknownProvider.
+func NewRegistryFromConfig(cfg Config) *Registry {
 	r := NewRegistry()
-	_ = providerName
-	_ = providerKey
-	_ = webhookSecret
+	switch strings.ToLower(strings.TrimSpace(cfg.Provider)) {
+	case "stripe":
+		if strings.TrimSpace(cfg.SecretKey) != "" {
+			r.Register(NewStripe(cfg.SecretKey, cfg.WebhookSecret, cfg.Currency, cfg.SuccessURL, cfg.CancelURL))
+		}
+	}
 	return r
 }

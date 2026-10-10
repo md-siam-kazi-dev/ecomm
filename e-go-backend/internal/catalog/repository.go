@@ -19,7 +19,9 @@ type CatalogRepository interface {
 	ProductBySlug(ctx context.Context, slug string) (ProductRecord, error)
 	RelatedProducts(ctx context.Context, slug string, limit int) ([]ProductRecord, error)
 	ListCategories(ctx context.Context) ([]CategoryRecord, error)
-	ProductReviews(ctx context.Context, slug string, limit int) ([]ReviewRecord, error)
+	ProductReviews(ctx context.Context, slug string, page, limit int) ([]ReviewRecord, int64, error)
+	ProductRating(ctx context.Context, slug string) (RatingSummaryRecord, error)
+	ProductQuestions(ctx context.Context, slug string, page, limit int) ([]QuestionRecord, int64, error)
 	TopReviews(ctx context.Context, limit int) ([]ReviewRecord, error)
 }
 
@@ -232,7 +234,7 @@ const reviewColumns = `
 	COALESCE(NULLIF(TRIM(CONCAT_WS(' ', up.first_name, up.last_name)), ''), split_part(u.email, '@', 1)),
 	r.rating, COALESCE(r.title, ''), r.content,
 	(r.order_item_id IS NOT NULL) AS verified,
-	COALESCE(v.helpful, 0)::bigint, r.created_at`
+	COALESCE(v.helpful, 0)::bigint, COALESCE(r.vendor_reply, ''), r.vendor_replied_at, r.created_at`
 
 const reviewFrom = `
 	FROM reviews r
@@ -244,17 +246,167 @@ const reviewFrom = `
 		FROM review_votes rv WHERE rv.review_id = r.id
 	) v ON TRUE`
 
-// ProductReviews returns the published reviews for a product, newest first.
-func (r *Repository) ProductReviews(ctx context.Context, slug string, limit int) ([]ReviewRecord, error) {
+// ProductReviews returns one page of the published reviews for a product,
+// newest first, plus the total count.
+func (r *Repository) ProductReviews(ctx context.Context, slug string, page, limit int) ([]ReviewRecord, int64, error) {
+	var total int64
+	if err := r.db.QueryRow(ctx, `
+		SELECT count(*)
+		FROM reviews r
+		JOIN products p ON p.id = r.product_id
+		WHERE (p.slug = $1 OR p.id::text = $1) AND r.status = 'published'`, slug,
+	).Scan(&total); err != nil {
+		return nil, 0, apperr.ErrInternal.WithCause(err)
+	}
+	if total == 0 {
+		return []ReviewRecord{}, 0, nil
+	}
+
 	rows, err := r.db.Query(ctx, "SELECT "+reviewColumns+reviewFrom+`
 		WHERE (p.slug = $1 OR p.id::text = $1) AND r.status = 'published'
 		ORDER BY r.created_at DESC, r.id
-		LIMIT $2`, slug, limit)
+		LIMIT $2 OFFSET $3`, slug, limit, (page-1)*limit)
+	if err != nil {
+		return nil, 0, apperr.ErrInternal.WithCause(err)
+	}
+	defer rows.Close()
+
+	records, err := collectReviews(rows, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	return records, total, nil
+}
+
+// ProductRating aggregates a product's published reviews into a 1..5 star
+// distribution and total count. The average is derived by the service.
+func (r *Repository) ProductRating(ctx context.Context, slug string) (RatingSummaryRecord, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT r.rating, count(*)::bigint
+		FROM reviews r
+		JOIN products p ON p.id = r.product_id
+		WHERE (p.slug = $1 OR p.id::text = $1) AND r.status = 'published'
+		GROUP BY r.rating`, slug)
+	if err != nil {
+		return RatingSummaryRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+	defer rows.Close()
+
+	var summary RatingSummaryRecord
+	for rows.Next() {
+		var (
+			rating int
+			count  int64
+		)
+		if err := rows.Scan(&rating, &count); err != nil {
+			return RatingSummaryRecord{}, apperr.ErrInternal.WithCause(err)
+		}
+		if rating >= 1 && rating <= 5 {
+			summary.Distribution[rating-1] = count
+			summary.Total += count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return RatingSummaryRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+	return summary, nil
+}
+
+// ProductQuestions returns one page of the published questions for a product,
+// newest first, each with its public answers, plus the total count.
+func (r *Repository) ProductQuestions(ctx context.Context, slug string, page, limit int) ([]QuestionRecord, int64, error) {
+	var total int64
+	if err := r.db.QueryRow(ctx, `
+		SELECT count(*)
+		FROM product_questions q
+		JOIN products p ON p.id = q.product_id
+		WHERE (p.slug = $1 OR p.id::text = $1) AND q.is_published`, slug,
+	).Scan(&total); err != nil {
+		return nil, 0, apperr.ErrInternal.WithCause(err)
+	}
+	if total == 0 {
+		return []QuestionRecord{}, 0, nil
+	}
+
+	rows, err := r.db.Query(ctx, `
+		SELECT q.id, q.question,
+		       COALESCE(NULLIF(TRIM(CONCAT_WS(' ', up.first_name, up.last_name)), ''), split_part(u.email, '@', 1)),
+		       q.created_at
+		FROM product_questions q
+		JOIN products p ON p.id = q.product_id
+		JOIN users u ON u.id = q.user_id
+		LEFT JOIN user_profiles up ON up.user_id = q.user_id
+		WHERE (p.slug = $1 OR p.id::text = $1) AND q.is_published
+		ORDER BY q.created_at DESC, q.id
+		LIMIT $2 OFFSET $3`, slug, limit, (page-1)*limit)
+	if err != nil {
+		return nil, 0, apperr.ErrInternal.WithCause(err)
+	}
+	defer rows.Close()
+
+	records := make([]QuestionRecord, 0, limit)
+	for rows.Next() {
+		var q QuestionRecord
+		if err := rows.Scan(&q.ID, &q.Question, &q.Author, &q.CreatedAt); err != nil {
+			return nil, 0, apperr.ErrInternal.WithCause(err)
+		}
+		q.Answers = []AnswerRecord{}
+		records = append(records, q)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, apperr.ErrInternal.WithCause(err)
+	}
+	if len(records) == 0 {
+		return records, total, nil
+	}
+
+	ids := make([]string, 0, len(records))
+	for _, rec := range records {
+		ids = append(ids, rec.ID)
+	}
+	answers, err := r.answersForQuestions(ctx, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range records {
+		if list, ok := answers[records[i].ID]; ok {
+			records[i].Answers = list
+		}
+	}
+	return records, total, nil
+}
+
+// answersForQuestions loads the public answers for a set of question ids.
+func (r *Repository) answersForQuestions(ctx context.Context, ids []string) (map[string][]AnswerRecord, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT a.question_id, a.id, a.answer, a.is_official_vendor_answer,
+		       COALESCE(NULLIF(TRIM(CONCAT_WS(' ', up.first_name, up.last_name)), ''), split_part(u.email, '@', 1)),
+		       a.created_at
+		FROM product_question_answers a
+		JOIN users u ON u.id = a.user_id
+		LEFT JOIN user_profiles up ON up.user_id = a.user_id
+		WHERE a.question_id::text = ANY(string_to_array($1, ','))
+		ORDER BY a.created_at, a.id`, strings.Join(ids, ","))
 	if err != nil {
 		return nil, apperr.ErrInternal.WithCause(err)
 	}
 	defer rows.Close()
-	return collectReviews(rows, limit)
+
+	grouped := make(map[string][]AnswerRecord, len(ids))
+	for rows.Next() {
+		var (
+			questionID string
+			a          AnswerRecord
+		)
+		if err := rows.Scan(&questionID, &a.ID, &a.Answer, &a.IsOfficialVendorAnswer, &a.Author, &a.CreatedAt); err != nil {
+			return nil, apperr.ErrInternal.WithCause(err)
+		}
+		grouped[questionID] = append(grouped[questionID], a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, apperr.ErrInternal.WithCause(err)
+	}
+	return grouped, nil
 }
 
 // TopReviews returns the highest-rated published reviews (home testimonials).
@@ -313,7 +465,8 @@ func collectReviews(rows pgx.Rows, limit int) ([]ReviewRecord, error) {
 		var rec ReviewRecord
 		if err := rows.Scan(
 			&rec.ID, &rec.ProductID, &rec.ProductName, &rec.ProductSlug, &rec.Author,
-			&rec.Rating, &rec.Title, &rec.Comment, &rec.VerifiedPurchase, &rec.HelpfulCount, &rec.CreatedAt,
+			&rec.Rating, &rec.Title, &rec.Comment, &rec.VerifiedPurchase, &rec.HelpfulCount,
+			&rec.VendorReply, &rec.VendorRepliedAt, &rec.CreatedAt,
 		); err != nil {
 			return nil, apperr.ErrInternal.WithCause(err)
 		}

@@ -97,13 +97,46 @@ func (s *Service) Categories(ctx context.Context) ([]CategoryDTO, error) {
 	return items, nil
 }
 
-// Reviews returns the published reviews for a product.
-func (s *Service) Reviews(ctx context.Context, slug string, limit int) ([]ReviewDTO, error) {
-	records, err := s.repo.ProductReviews(ctx, slug, clampLimit(limit, 50, 100))
-	if err != nil {
-		return nil, err
+// Reviews returns a page of published reviews for a product.
+func (s *Service) Reviews(ctx context.Context, slug string, page, limit int) ([]ReviewDTO, response.Pagination, error) {
+	if page < 1 {
+		page = 1
 	}
-	return toReviewDTOs(records), nil
+	limit = clampLimit(limit, 10, 50)
+
+	records, total, err := s.repo.ProductReviews(ctx, slug, page, limit)
+	if err != nil {
+		return nil, response.Pagination{}, err
+	}
+	return toReviewDTOs(records), response.Pagination{Page: page, Limit: limit, Total: total}, nil
+}
+
+// Rating returns a product's published-review rating summary and distribution.
+func (s *Service) Rating(ctx context.Context, slug string) (RatingSummaryDTO, error) {
+	record, err := s.repo.ProductRating(ctx, slug)
+	if err != nil {
+		return RatingSummaryDTO{}, err
+	}
+	return toRatingSummaryDTO(record), nil
+}
+
+// Questions returns a page of published questions (with answers) for a product.
+func (s *Service) Questions(ctx context.Context, slug string, page, limit int) ([]QuestionDTO, response.Pagination, error) {
+	if page < 1 {
+		page = 1
+	}
+	limit = clampLimit(limit, 10, 50)
+
+	records, total, err := s.repo.ProductQuestions(ctx, slug, page, limit)
+	if err != nil {
+		return nil, response.Pagination{}, err
+	}
+
+	items := make([]QuestionDTO, 0, len(records))
+	for _, rec := range records {
+		items = append(items, toQuestionDTO(rec))
+	}
+	return items, response.Pagination{Page: page, Limit: limit, Total: total}, nil
 }
 
 // TopReviews returns the top published reviews for the homepage.

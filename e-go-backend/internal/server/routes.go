@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/md-siam-kazi/e-go-backend/internal/auth"
 	"github.com/md-siam-kazi/e-go-backend/internal/catalog"
 	"github.com/md-siam-kazi/e-go-backend/internal/database"
+	"github.com/md-siam-kazi/e-go-backend/internal/feedback"
+	"github.com/md-siam-kazi/e-go-backend/internal/order"
 	"github.com/md-siam-kazi/e-go-backend/internal/storeapp"
 	"github.com/md-siam-kazi/e-go-backend/internal/vendor"
 	"github.com/md-siam-kazi/e-go-backend/pkg/imgbb"
@@ -66,11 +69,32 @@ func (s *Server) registerModules(api chi.Router) {
 
 	// Store applications / vendor onboarding. Applicant routes are auth-only;
 	// admin review routes mount inside the /admin group below.
-	paymentRegistry := payment.NewRegistryFromConfig(
-		s.cfg.Payment.Provider, s.cfg.Payment.ProviderKey, s.cfg.Payment.WebhookSecret,
-	)
+	frontendURL := strings.TrimRight(s.cfg.Auth.FrontendURL, "/")
+	if frontendURL == "" {
+		frontendURL = "http://localhost:3000"
+	}
+	paymentRegistry := payment.NewRegistryFromConfig(payment.Config{
+		Provider:      s.cfg.Payment.Provider,
+		SecretKey:     s.cfg.Payment.ProviderKey,
+		WebhookSecret: s.cfg.Payment.WebhookSecret,
+		Currency:      s.cfg.Payment.Currency,
+		SuccessURL:    frontendURL + "/order/success",
+		CancelURL:     frontendURL + "/checkout",
+	})
 	storeappSvc := storeapp.BuildService(s.db, s.cfg, paymentRegistry)
 	storeapp.RegisterApplicant(api, s.signer, storeappSvc, ratelimit.New(s.redis))
+
+	// Storefront orders + Stripe checkout.
+	order.Register(api, s.signer, order.Deps{
+		DB:          s.db,
+		Cfg:         s.cfg,
+		Registry:    paymentRegistry,
+		FrontendURL: frontendURL,
+		RateLimiter: ratelimit.New(s.redis),
+	})
+
+	// Customer feedback (reviews + product questions) — authenticated writes.
+	feedback.Register(api, s.signer, s.db, ratelimit.New(s.redis))
 
 	// Admin-only area: authenticate, then require the admin role.
 	api.Route("/admin", func(r chi.Router) {

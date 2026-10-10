@@ -15,10 +15,14 @@ type fakeRepo struct {
 	product    ProductRecord
 	productErr error
 
-	related    []ProductRecord
-	categories []CategoryRecord
-	reviews    []ReviewRecord
-	top        []ReviewRecord
+	related        []ProductRecord
+	categories     []CategoryRecord
+	reviews        []ReviewRecord
+	reviewsTotal   int64
+	rating         RatingSummaryRecord
+	questions      []QuestionRecord
+	questionsTotal int64
+	top            []ReviewRecord
 }
 
 func (f *fakeRepo) ListProducts(_ context.Context, q ListQuery, ids []string) ([]ProductRecord, int64, error) {
@@ -41,8 +45,16 @@ func (f *fakeRepo) ListCategories(context.Context) ([]CategoryRecord, error) {
 	return f.categories, nil
 }
 
-func (f *fakeRepo) ProductReviews(context.Context, string, int) ([]ReviewRecord, error) {
-	return f.reviews, nil
+func (f *fakeRepo) ProductReviews(context.Context, string, int, int) ([]ReviewRecord, int64, error) {
+	return f.reviews, f.reviewsTotal, nil
+}
+
+func (f *fakeRepo) ProductRating(context.Context, string) (RatingSummaryRecord, error) {
+	return f.rating, nil
+}
+
+func (f *fakeRepo) ProductQuestions(context.Context, string, int, int) ([]QuestionRecord, int64, error) {
+	return f.questions, f.questionsTotal, nil
 }
 
 func (f *fakeRepo) TopReviews(context.Context, int) ([]ReviewRecord, error) {

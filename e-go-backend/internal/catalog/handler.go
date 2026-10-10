@@ -51,13 +51,34 @@ func (h *Handler) Related(w http.ResponseWriter, r *http.Request) {
 
 // ListReviews handles GET /api/v1/products/{slug}/reviews.
 func (h *Handler) ListReviews(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	items, err := h.svc.Reviews(r.Context(), chi.URLParam(r, "slug"), limit)
+	page, limit := pageParams(r)
+	items, pagination, err := h.svc.Reviews(r.Context(), chi.URLParam(r, "slug"), page, limit)
 	if err != nil {
 		response.Error(w, r, err)
 		return
 	}
-	response.OK(w, items, "")
+	response.List(w, items, pagination)
+}
+
+// Rating handles GET /api/v1/products/{slug}/rating.
+func (h *Handler) Rating(w http.ResponseWriter, r *http.Request) {
+	summary, err := h.svc.Rating(r.Context(), chi.URLParam(r, "slug"))
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+	response.OK(w, summary, "")
+}
+
+// Questions handles GET /api/v1/products/{slug}/questions.
+func (h *Handler) Questions(w http.ResponseWriter, r *http.Request) {
+	page, limit := pageParams(r)
+	items, pagination, err := h.svc.Questions(r.Context(), chi.URLParam(r, "slug"), page, limit)
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+	response.List(w, items, pagination)
 }
 
 // ListCategories handles GET /api/v1/categories.
@@ -79,6 +100,13 @@ func (h *Handler) TopReviews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.OK(w, items, "")
+}
+
+func pageParams(r *http.Request) (page, limit int) {
+	q := r.URL.Query()
+	page, _ = strconv.Atoi(q.Get("page"))
+	limit, _ = strconv.Atoi(q.Get("limit"))
+	return page, limit
 }
 
 func queryFrom(r *http.Request) (ListQuery, []string) {

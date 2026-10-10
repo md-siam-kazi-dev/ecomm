@@ -33,6 +33,50 @@ type fakeRepo struct {
 	lastAdjustVariant  string
 	adjustErr          error
 	adjusted           InventoryRecord
+
+	orderDetail       OrderDetailRecord
+	orderDetailErr    error
+	lastOrderDetailID string
+	lastShipment      ShipmentParams
+	shipmentErr       error
+	revenue           RevenueSummary
+	revenueErr        error
+
+	reviews         []VendorReviewRecord
+	reviewsTotal    int64
+	lastReviewQuery ListQuery
+	summary         ReviewSummaryRecord
+	summaryErr      error
+	replyRecord     VendorReviewRecord
+	replyErr        error
+	lastReply       string
+
+	questions         []VendorQuestionRecord
+	questionsTotal    int64
+	lastQuestionQuery ListQuery
+	answered          VendorQuestionRecord
+	answerErr         error
+	lastAnswer        string
+}
+
+func (f *fakeRepo) OrderDetail(_ context.Context, _, orderID string) (OrderDetailRecord, error) {
+	f.lastOrderDetailID = orderID
+	if f.orderDetailErr != nil {
+		return OrderDetailRecord{}, f.orderDetailErr
+	}
+	return f.orderDetail, nil
+}
+
+func (f *fakeRepo) UpsertShipmentEvent(_ context.Context, _, orderID string, p ShipmentParams) error {
+	f.lastShipment, f.lastOrderDetailID = p, orderID
+	return f.shipmentErr
+}
+
+func (f *fakeRepo) Revenue(_ context.Context, _ string) (RevenueSummary, error) {
+	if f.revenueErr != nil {
+		return RevenueSummary{}, f.revenueErr
+	}
+	return f.revenue, nil
 }
 
 func (f *fakeRepo) CreateProduct(_ context.Context, _ string, p ProductParams) (ProductDetail, error) {
@@ -112,6 +156,39 @@ func (f *fakeRepo) AdjustStock(_ context.Context, _, variantID, _ string, quanti
 		return InventoryRecord{}, f.adjustErr
 	}
 	return f.adjusted, nil
+}
+
+func (f *fakeRepo) ListReviews(_ context.Context, _ string, q ListQuery) ([]VendorReviewRecord, int64, error) {
+	f.lastReviewQuery = q
+	return f.reviews, f.reviewsTotal, nil
+}
+
+func (f *fakeRepo) ReviewSummary(_ context.Context, _ string) (ReviewSummaryRecord, error) {
+	if f.summaryErr != nil {
+		return ReviewSummaryRecord{}, f.summaryErr
+	}
+	return f.summary, nil
+}
+
+func (f *fakeRepo) ReplyToReview(_ context.Context, _, _ string, reply string) (VendorReviewRecord, error) {
+	f.lastReply = reply
+	if f.replyErr != nil {
+		return VendorReviewRecord{}, f.replyErr
+	}
+	return f.replyRecord, nil
+}
+
+func (f *fakeRepo) ListQuestions(_ context.Context, _ string, q ListQuery) ([]VendorQuestionRecord, int64, error) {
+	f.lastQuestionQuery = q
+	return f.questions, f.questionsTotal, nil
+}
+
+func (f *fakeRepo) AnswerQuestion(_ context.Context, _, _, _ string, answer string) (VendorQuestionRecord, error) {
+	f.lastAnswer = answer
+	if f.answerErr != nil {
+		return VendorQuestionRecord{}, f.answerErr
+	}
+	return f.answered, nil
 }
 
 func newFakeRepo() *fakeRepo {

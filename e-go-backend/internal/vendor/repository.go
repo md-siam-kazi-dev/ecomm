@@ -31,8 +31,16 @@ type VendorRepository interface {
 	UpdateProduct(ctx context.Context, vendorID, productID string, p ProductParams) (ProductDetail, error)
 	GetProduct(ctx context.Context, vendorID, productID string) (ProductDetail, error)
 	ListOrders(ctx context.Context, vendorID string, q ListQuery) ([]OrderRecord, int64, error)
+	OrderDetail(ctx context.Context, vendorID, orderID string) (OrderDetailRecord, error)
+	UpsertShipmentEvent(ctx context.Context, vendorID, orderID string, p ShipmentParams) error
+	Revenue(ctx context.Context, vendorID string) (RevenueSummary, error)
 	ListInventory(ctx context.Context, vendorID string, q ListQuery) ([]InventoryRecord, int64, error)
 	AdjustStock(ctx context.Context, vendorID, variantID, userID string, quantity int, note string) (InventoryRecord, error)
+	ListReviews(ctx context.Context, vendorID string, q ListQuery) ([]VendorReviewRecord, int64, error)
+	ReviewSummary(ctx context.Context, vendorID string) (ReviewSummaryRecord, error)
+	ReplyToReview(ctx context.Context, vendorID, reviewID, reply string) (VendorReviewRecord, error)
+	ListQuestions(ctx context.Context, vendorID string, q ListQuery) ([]VendorQuestionRecord, int64, error)
+	AnswerQuestion(ctx context.Context, vendorID, questionID, userID, answer string) (VendorQuestionRecord, error)
 }
 
 // errProductNotFound is returned when a product does not exist or is not owned

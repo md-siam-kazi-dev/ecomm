@@ -5,7 +5,7 @@
 - Maintains the canonical database schema/DDL in an `ARCHITECTURE.md` and treats it as the source of truth when creating tables/migrations. Confidence: 0.55
 - Expects user passwords to be hashed at rest (bcrypt) before being saved, and never stored or returned in plaintext. Confidence: 0.6
 - Prefers staged/incremental backend work: wire up an endpoint that just receives and acknowledges data first (real logic stubbed with TODOs) before implementing persistence, hashing, or tokens. Confidence: 0.6
-- Prefers to supply DB connection strings / secrets themselves (e.g. adds `DATABASE_URL` to `.env` personally) rather than having the agent invent or commit credentials. Confidence: 0.5
+- Prefers to supply connection strings / secrets / environment variables themselves (e.g. adds `DATABASE_URL` or a payment-provider key to `.env` personally, and says "I already add env variable property") rather than having the agent invent or commit credentials. Confidence: 0.55
 - Wants changes kept minimal and additive: inspect the existing project first, adapt to its architecture, reuse existing config/router/logger/DB abstractions, and never rewrite unrelated code or introduce duplicate abstractions. Confidence: 0.7
 - Explicitly asks for implementations that avoid over-engineering and stay understandable/maintainable. Confidence: 0.6
 - Expects `gofmt`, `go vet`, `go test ./...` and `go build ./...` to be run and pass after implementation as part of finishing work. Confidence: 0.6
@@ -56,3 +56,7 @@ rea, wants it to mirror the structure and quality of the existing analogous area
 - Expects the critical security and business rules of a feature to be covered by automated tests (auth/role gating, cross-account ownership isolation, server-verified state changes, idempotency), using the project's existing test tools and conventions. Confidence: 0.55
 - Expects standard backend security hardening on new endpoints: parameterized SQL (no string-built queries), rate limiting on sensitive actions (submission, admin state changes), and an audit trail for critical state transitions. Confidence: 0.5
 - Wants no static/mock/demo data left in the app — catalog and other domain data must be served by the real backend API, and the mock data files should be deleted (not kept alongside the live path) once the API can replace them. Confidence: 0.5
+- Prefers Stripe as the payment provider, implemented server-side in the Go backend (rather than any client-side/mock checkout). Confidence: 0.6
+- Wants payment and other third-party integrations exercised via a sandbox/test setup (e.g. Stripe sandbox keys and test cards) rather than live credentials during development. Confidence: 0.5
+- Provisions third-party services himself — connects to them via MCP servers (e.g. Stripe MCP, Neon MCP) and/or sandbox accounts — and expects the agent to implement against them rather than inventing credentials. Confidence: 0.55
+- Debugs by running the app himself and pasting the raw terminal/server output (structured request logs, stack traces) rather than describing the symptom — expects the agent to diagnose the root cause from the logs, verify it against the DB/data, and then explain the fix. Confidence: 0.5

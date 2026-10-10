@@ -248,6 +248,152 @@ func (h *Handler) AdjustStock(w http.ResponseWriter, r *http.Request) {
 	response.OK(w, item, "Stock updated")
 }
 
+// GetOrder handles GET /api/v1/vendor/orders/{id}.
+func (h *Handler) GetOrder(w http.ResponseWriter, r *http.Request) {
+	id, ok := identity(r)
+	if !ok {
+		response.Error(w, r, apperr.ErrUnauthorized)
+		return
+	}
+
+	order, err := h.svc.OrderDetail(r.Context(), id.UserID, requestedStoreID(r), chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+	response.OK(w, order, "")
+}
+
+// AddShipmentEvent handles POST /api/v1/vendor/orders/{id}/shipment.
+func (h *Handler) AddShipmentEvent(w http.ResponseWriter, r *http.Request) {
+	id, ok := identity(r)
+	if !ok {
+		response.Error(w, r, apperr.ErrUnauthorized)
+		return
+	}
+
+	var req ShipmentEventRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, r, errInvalidBody.WithCause(err))
+		return
+	}
+
+	order, err := h.svc.AddShipmentEvent(r.Context(), id.UserID, requestedStoreID(r), chi.URLParam(r, "id"), req)
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+	response.OK(w, order, "Shipment updated")
+}
+
+// Revenue handles GET /api/v1/vendor/revenue.
+func (h *Handler) Revenue(w http.ResponseWriter, r *http.Request) {
+	id, ok := identity(r)
+	if !ok {
+		response.Error(w, r, apperr.ErrUnauthorized)
+		return
+	}
+
+	revenue, err := h.svc.Revenue(r.Context(), id.UserID, requestedStoreID(r))
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+	response.OK(w, revenue, "")
+}
+
+// ListReviews handles GET /api/v1/vendor/reviews.
+func (h *Handler) ListReviews(w http.ResponseWriter, r *http.Request) {
+	id, ok := identity(r)
+	if !ok {
+		response.Error(w, r, apperr.ErrUnauthorized)
+		return
+	}
+
+	items, pagination, err := h.svc.ListReviews(r.Context(), id.UserID, requestedStoreID(r), queryFrom(r))
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+	response.List(w, items, pagination)
+}
+
+// ReviewSummary handles GET /api/v1/vendor/reviews/summary.
+func (h *Handler) ReviewSummary(w http.ResponseWriter, r *http.Request) {
+	id, ok := identity(r)
+	if !ok {
+		response.Error(w, r, apperr.ErrUnauthorized)
+		return
+	}
+
+	summary, err := h.svc.ReviewSummary(r.Context(), id.UserID, requestedStoreID(r))
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+	response.OK(w, summary, "")
+}
+
+// ReplyToReview handles POST /api/v1/vendor/reviews/{id}/reply.
+func (h *Handler) ReplyToReview(w http.ResponseWriter, r *http.Request) {
+	id, ok := identity(r)
+	if !ok {
+		response.Error(w, r, apperr.ErrUnauthorized)
+		return
+	}
+
+	var req ReplyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, r, errInvalidBody.WithCause(err))
+		return
+	}
+
+	review, err := h.svc.ReplyToReview(r.Context(), id.UserID, requestedStoreID(r), chi.URLParam(r, "id"), req)
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+	response.OK(w, review, "Reply saved")
+}
+
+// ListQuestions handles GET /api/v1/vendor/questions.
+func (h *Handler) ListQuestions(w http.ResponseWriter, r *http.Request) {
+	id, ok := identity(r)
+	if !ok {
+		response.Error(w, r, apperr.ErrUnauthorized)
+		return
+	}
+
+	items, pagination, err := h.svc.ListQuestions(r.Context(), id.UserID, requestedStoreID(r), queryFrom(r))
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+	response.List(w, items, pagination)
+}
+
+// AnswerQuestion handles POST /api/v1/vendor/questions/{id}/answer.
+func (h *Handler) AnswerQuestion(w http.ResponseWriter, r *http.Request) {
+	id, ok := identity(r)
+	if !ok {
+		response.Error(w, r, apperr.ErrUnauthorized)
+		return
+	}
+
+	var req AnswerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, r, errInvalidBody.WithCause(err))
+		return
+	}
+
+	question, err := h.svc.AnswerQuestion(r.Context(), id.UserID, requestedStoreID(r), chi.URLParam(r, "id"), req)
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+	response.OK(w, question, "Answer saved")
+}
+
 func queryFrom(r *http.Request) ListQuery {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))

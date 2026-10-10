@@ -138,7 +138,18 @@ POST /api/v1/vendor/products
 PUT  /api/v1/vendor/products/{id}
 POST /api/v1/vendor/products/images          (multipart, field "image")
 GET  /api/v1/vendor/orders?page=1&limit=20&status=shipped
+GET  /api/v1/vendor/orders/{id}
+POST /api/v1/vendor/orders/{id}/shipment     { carrier, tracking_number, status, location, description, event_time? }
+GET  /api/v1/vendor/revenue
 ```
+
+Order fulfilment: `GET /orders/{id}` returns the store's items, the buyer's
+shipping address and the shipment timeline; `POST /orders/{id}/shipment` appends
+a `tracking_events` row (creating the `shipments` row and `shipment_items` on
+first use) and advances the order status (`packed → packed`,
+`shipped/in_transit/out_for_delivery → shipped`, `delivered → delivered`).
+`GET /revenue` aggregates the store's revenue, a 6-month series, top products and
+per-status counts (cancelled/returned/refunded excluded).
 
 Every query is scoped to the vendor (`products.vendor_id`,
 `order_items.vendor_id`); another vendor's product id returns 404. Product
@@ -201,6 +212,41 @@ No payment provider is integrated yet: the platform ships with
 `PAYMENT_NOT_CONFIGURED` (never a fake success). Configure with
 `APPLICATION_FEE_ENABLED`, `APPLICATION_FEE_AMOUNT`, `APPLICATION_FEE_CURRENCY`,
 `PAYMENT_PROVIDER`, `PAYMENT_WEBHOOK_SECRET` and `APP_NAME`.
+
+## Orders & payments (Stripe)
+
+Signed-in customers place orders against the storefront catalog. Prices, stock
+and totals are computed server-side — the client sends only ids + quantity.
+
+```text
+POST /api/v1/orders                    (auth)   create order + start payment
+GET  /api/v1/orders                    (auth)   the caller's orders (paged)
+GET  /api/v1/orders/{id}               (auth)   one order (owner only)
+POST /api/v1/orders/webhook/{provider} (public) provider callback
+```
+
+Order creation is transactional: `orders` + `order_items` (name/price snapshots)
++ `order_addresses` + `order_status_history`, and it decrements `inventory`
+(recording an `inventory_movements` row). `cod` orders stay `pending`; online
+payment inserts a `payments` row and creates a Stripe Checkout Session, returning
+a `checkout_url`. The customer is redirected to Stripe and back to
+`/order/success?order=<id>`.
+
+Stripe lives in `pkg/payment` (hosted Checkout over REST, no SDK): `Initiate`
+creates the session; `Verify` checks the `Stripe-Signature` HMAC (with timestamp
+tolerance) and only treats `checkout.session.completed` + `payment_status=paid`
+as paid. The webhook marks the payment `paid`, records a `payment_transactions`
+row and confirms the order exactly once (idempotent for retries). Configure with
+`PAYMENT_PROVIDER=stripe`, `PAYMENT_PROVIDER_KEY=sk_test_…`,
+`PAYMENT_WEBHOOK_SECRET=whsec_…`, `PAYMENT_CURRENCY`, and the `ORDER_*` shipping
+settings. For local sandbox testing:
+
+```bash
+stripe listen --forward-to localhost:8080/api/v1/orders/webhook/stripe
+```
+
+Checkout requires an account (`orders.user_id` is `NOT NULL`); guests are sent to
+sign in.
 
 ## Migrations
 

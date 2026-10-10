@@ -101,7 +101,7 @@ type SummaryResponse struct {
 
 // OrderItem is a row in the vendor's order list.
 type OrderItem struct {
-	OrderID     string  `json:"order_id"`
+	ID          string  `json:"id"`
 	OrderNumber string  `json:"order_number"`
 	Status      string  `json:"status"`
 	ItemCount   int64   `json:"item_count"`
@@ -215,7 +215,7 @@ func toSummaryResponse(s Summary) SummaryResponse {
 
 func toOrderItem(r OrderRecord) OrderItem {
 	return OrderItem{
-		OrderID:     r.OrderID,
+		ID:          r.OrderID,
 		OrderNumber: r.OrderNumber,
 		Status:      r.Status,
 		ItemCount:   r.ItemCount,
