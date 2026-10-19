@@ -26,6 +26,7 @@ type ReviewParams struct {
 	Rating      int
 	Title       string
 	Comment     string
+	Images      []string
 }
 
 // ReviewRecord is a persisted review.
@@ -38,6 +39,7 @@ type ReviewRecord struct {
 	Title       string
 	Comment     string
 	Status      string
+	Images      []string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
@@ -83,5 +85,20 @@ var (
 	errInvalidQuestion = apperr.New(
 		http.StatusUnprocessableEntity, "VALIDATION_ERROR",
 		"Enter a question between 5 and 1000 characters",
+	)
+
+	errInvalidImages = apperr.New(
+		http.StatusUnprocessableEntity, "VALIDATION_ERROR",
+		"Attach at most 4 photos to a review",
+	)
+
+	errInvalidImage = apperr.New(
+		http.StatusBadRequest, "INVALID_IMAGE",
+		"Attach a PNG, JPG, WebP or GIF image (max 5 MB)",
+	)
+
+	errImageUnavailable = apperr.New(
+		http.StatusServiceUnavailable, "IMAGE_HOSTING_UNAVAILABLE",
+		"Image uploads are not configured",
 	)
 )

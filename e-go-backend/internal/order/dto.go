@@ -32,11 +32,12 @@ type CreateOrderRequest struct {
 
 // OrderItemReviewResponse is the caller's existing review for an order line.
 type OrderItemReviewResponse struct {
-	ID        string `json:"id"`
-	Rating    int    `json:"rating"`
-	Title     string `json:"title"`
-	Comment   string `json:"comment"`
-	CreatedAt string `json:"created_at"`
+	ID        string   `json:"id"`
+	Rating    int      `json:"rating"`
+	Title     string   `json:"title"`
+	Comment   string   `json:"comment"`
+	Images    []string `json:"images,omitempty"`
+	CreatedAt string   `json:"created_at"`
 }
 
 // OrderItemResponse is one line in an order.
@@ -96,6 +97,7 @@ func toOrderResponse(o Order) OrderResponse {
 				Rating:    item.Review.Rating,
 				Title:     item.Review.Title,
 				Comment:   item.Review.Comment,
+				Images:    item.Review.Images,
 				CreatedAt: item.Review.CreatedAt.UTC().Format(time.RFC3339),
 			}
 		}

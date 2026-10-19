@@ -11,6 +11,15 @@ import (
 // featured (there is no curated flag in the schema yet).
 const isFeaturedRating = 4.0
 
+// optionalTime renders a timestamp as RFC3339, returning "" for the zero value
+// so the owning DTO omits it (e.g. in tests that build records by hand).
+func optionalTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
 // SpecificationDTO is a label/value spec derived from products.attributes.
 type SpecificationDTO struct {
 	Label string `json:"label"`
@@ -33,6 +42,8 @@ type ProductDTO struct {
 	Category         string             `json:"category"`
 	CategorySlug     string             `json:"category_slug"`
 	Brand            string             `json:"brand,omitempty"`
+	StoreName        string             `json:"store_name,omitempty"`
+	StoreSlug        string             `json:"store_slug,omitempty"`
 	Rating           float64            `json:"rating"`
 	ReviewCount      int64              `json:"review_count"`
 	IsFeatured       bool               `json:"is_featured"`
@@ -54,23 +65,42 @@ type CategoryDTO struct {
 	ImageURL     string `json:"image_url,omitempty"`
 	ImageAlt     string `json:"image_alt,omitempty"`
 	ProductCount int64  `json:"product_count"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
+}
+
+// StoreDTO is a public storefront store profile.
+type StoreDTO struct {
+	ID               string  `json:"id"`
+	Name             string  `json:"name"`
+	Slug             string  `json:"slug"`
+	Description      string  `json:"description"`
+	LogoURL          string  `json:"logo_url,omitempty"`
+	BannerURL        string  `json:"banner_url,omitempty"`
+	Category         string  `json:"category,omitempty"`
+	ProductCount     int64   `json:"product_count"`
+	FollowerCount    int64   `json:"follower_count"`
+	ReviewCount      int64   `json:"review_count"`
+	PositiveFeedback float64 `json:"positive_feedback"`
+	UpdatedAt        string  `json:"updated_at,omitempty"`
 }
 
 // ReviewDTO is a published product review.
 type ReviewDTO struct {
-	ID                 string `json:"id"`
-	ProductID          string `json:"product_id"`
-	ProductName        string `json:"product_name,omitempty"`
-	ProductSlug        string `json:"product_slug,omitempty"`
-	Author             string `json:"author"`
-	Rating             int    `json:"rating"`
-	Title              string `json:"title"`
-	Comment            string `json:"comment"`
-	IsVerifiedPurchase bool   `json:"is_verified_purchase"`
-	HelpfulCount       int64  `json:"helpful_count"`
-	VendorReply        string `json:"vendor_reply,omitempty"`
-	VendorRepliedAt    string `json:"vendor_replied_at,omitempty"`
-	CreatedAt          string `json:"created_at"`
+	ID                 string   `json:"id"`
+	ProductID          string   `json:"product_id"`
+	ProductName        string   `json:"product_name,omitempty"`
+	ProductSlug        string   `json:"product_slug,omitempty"`
+	Author             string   `json:"author"`
+	AvatarURL          string   `json:"avatar_url,omitempty"`
+	Rating             int      `json:"rating"`
+	Title              string   `json:"title"`
+	Comment            string   `json:"comment"`
+	IsVerifiedPurchase bool     `json:"is_verified_purchase"`
+	HelpfulCount       int64    `json:"helpful_count"`
+	VendorReply        string   `json:"vendor_reply,omitempty"`
+	VendorRepliedAt    string   `json:"vendor_replied_at,omitempty"`
+	Images             []string `json:"images,omitempty"`
+	CreatedAt          string   `json:"created_at"`
 }
 
 // RatingSummaryDTO is a product's published-review rating aggregate.
@@ -114,6 +144,8 @@ func toProductDTO(r ProductRecord) ProductDTO {
 		Category:         r.Category,
 		CategorySlug:     r.CategorySlug,
 		Brand:            r.Brand,
+		StoreName:        r.StoreName,
+		StoreSlug:        r.StoreSlug,
 		Rating:           r.Rating,
 		ReviewCount:      r.ReviewCount,
 		IsFeatured:       r.Rating >= isFeaturedRating,
@@ -166,6 +198,7 @@ func toCategoryDTO(r CategoryRecord) CategoryDTO {
 		ImageURL:     r.ImageURL,
 		ImageAlt:     r.Name + " category",
 		ProductCount: r.ProductCount,
+		UpdatedAt:    optionalTime(r.UpdatedAt),
 	}
 }
 
@@ -176,6 +209,7 @@ func toReviewDTO(r ReviewRecord) ReviewDTO {
 		ProductName:        r.ProductName,
 		ProductSlug:        r.ProductSlug,
 		Author:             r.Author,
+		AvatarURL:          r.AvatarURL,
 		Rating:             r.Rating,
 		Title:              r.Title,
 		Comment:            r.Comment,
@@ -186,6 +220,9 @@ func toReviewDTO(r ReviewRecord) ReviewDTO {
 	}
 	if r.VendorRepliedAt != nil {
 		dto.VendorRepliedAt = r.VendorRepliedAt.UTC().Format(time.RFC3339)
+	}
+	if len(r.Images) > 0 {
+		dto.Images = r.Images
 	}
 	return dto
 }
@@ -223,5 +260,26 @@ func toQuestionDTO(q QuestionRecord) QuestionDTO {
 		Author:    q.Author,
 		CreatedAt: q.CreatedAt.UTC().Format(time.RFC3339),
 		Answers:   answers,
+	}
+}
+
+func toStoreDTO(r StoreRecord) StoreDTO {
+	var positive float64
+	if r.ReviewCount > 0 {
+		positive = float64(r.PositiveCount) / float64(r.ReviewCount) * 100
+	}
+	return StoreDTO{
+		ID:               r.ID,
+		Name:             r.Name,
+		Slug:             r.Slug,
+		Description:      r.Description,
+		LogoURL:          r.LogoURL,
+		BannerURL:        r.BannerURL,
+		Category:         r.Category,
+		ProductCount:     r.ProductCount,
+		FollowerCount:    r.FollowerCount,
+		ReviewCount:      r.ReviewCount,
+		PositiveFeedback: positive,
+		UpdatedAt:        optionalTime(r.UpdatedAt),
 	}
 }

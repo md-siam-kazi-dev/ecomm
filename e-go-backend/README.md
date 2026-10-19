@@ -255,6 +255,12 @@ are created in dependency order; note the documented circular dependency
 between `orders` and `inventory_reservations` (create the reservation table
 without the FK, then add it with `ALTER TABLE`).
 
+## Deployment
+
+Deploys to Vercel with the Go Framework Preset. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the env vars, migrations, region
+and cross-site cookie setup.
+
 ## Common commands
 
 ```bash

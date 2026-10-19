@@ -58,8 +58,19 @@ func (s *Service) provider() (payment.Provider, bool) {
 
 // Create validates and persists an order, then starts payment when required.
 func (s *Service) Create(ctx context.Context, userID string, req CreateOrderRequest) (CreateOrderResponse, error) {
+	// The checkout is built from the server-side cart unless the client sends
+	// explicit items. This keeps prices and line items authoritative.
+	usedCart := false
 	if len(req.Items) == 0 {
-		return CreateOrderResponse{}, errEmptyItems
+		cartItems, err := s.repo.CartItemsForUser(ctx, userID)
+		if err != nil {
+			return CreateOrderResponse{}, err
+		}
+		if len(cartItems) == 0 {
+			return CreateOrderResponse{}, errEmptyItems
+		}
+		req.Items = cartItems
+		usedCart = true
 	}
 	if len(req.Items) > maxOrderItems {
 		return CreateOrderResponse{}, apperr.ErrValidation
@@ -158,6 +169,7 @@ func (s *Service) Create(ctx context.Context, userID string, req CreateOrderRequ
 
 	out := CreateOrderResponse{Order: toOrderResponse(created)}
 	if !online {
+		s.convertCart(ctx, userID, usedCart)
 		return out, nil
 	}
 
@@ -184,7 +196,17 @@ func (s *Service) Create(ctx context.Context, userID string, req CreateOrderRequ
 	}
 
 	out.CheckoutURL = init.RedirectURL
+	s.convertCart(ctx, userID, usedCart)
 	return out, nil
+}
+
+// convertCart empties the user's server-side cart after a successful checkout.
+// Best-effort: the order already exists, so a cart hiccup must not fail it.
+func (s *Service) convertCart(ctx context.Context, userID string, used bool) {
+	if !used {
+		return
+	}
+	_ = s.repo.ConvertUserCart(ctx, userID)
 }
 
 // List returns a page of the caller's orders.

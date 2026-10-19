@@ -12,20 +12,21 @@ type ReplyRequest struct {
 
 // VendorReviewResponse is a review on the vendor's products.
 type VendorReviewResponse struct {
-	ID              string `json:"id"`
-	ProductID       string `json:"product_id"`
-	ProductName     string `json:"product_name"`
-	ProductSlug     string `json:"product_slug"`
-	ProductImage    string `json:"product_image,omitempty"`
-	Author          string `json:"author"`
-	OrderNumber     string `json:"order_number,omitempty"`
-	Rating          int    `json:"rating"`
-	Title           string `json:"title"`
-	Comment         string `json:"comment"`
-	CreatedAt       string `json:"created_at"`
-	Replied         bool   `json:"replied"`
-	VendorReply     string `json:"vendor_reply,omitempty"`
-	VendorRepliedAt string `json:"vendor_replied_at,omitempty"`
+	ID              string   `json:"id"`
+	ProductID       string   `json:"product_id"`
+	ProductName     string   `json:"product_name"`
+	ProductSlug     string   `json:"product_slug"`
+	ProductImage    string   `json:"product_image,omitempty"`
+	Author          string   `json:"author"`
+	OrderNumber     string   `json:"order_number,omitempty"`
+	Rating          int      `json:"rating"`
+	Title           string   `json:"title"`
+	Comment         string   `json:"comment"`
+	Images          []string `json:"images,omitempty"`
+	CreatedAt       string   `json:"created_at"`
+	Replied         bool     `json:"replied"`
+	VendorReply     string   `json:"vendor_reply,omitempty"`
+	VendorRepliedAt string   `json:"vendor_replied_at,omitempty"`
 }
 
 // ReviewSummaryResponse is the vendor's aggregate star feedback.
@@ -48,6 +49,7 @@ func toVendorReviewResponse(r VendorReviewRecord) VendorReviewResponse {
 		Rating:       r.Rating,
 		Title:        r.Title,
 		Comment:      r.Comment,
+		Images:       r.Images,
 		CreatedAt:    r.CreatedAt.UTC().Format(time.RFC3339),
 		VendorReply:  r.VendorReply,
 	}

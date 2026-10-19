@@ -8,11 +8,15 @@ import (
 
 	"github.com/md-siam-kazi/e-go-backend/internal/account"
 	"github.com/md-siam-kazi/e-go-backend/internal/admin"
+	"github.com/md-siam-kazi/e-go-backend/internal/audit"
 	"github.com/md-siam-kazi/e-go-backend/internal/auth"
+	"github.com/md-siam-kazi/e-go-backend/internal/cart"
 	"github.com/md-siam-kazi/e-go-backend/internal/catalog"
 	"github.com/md-siam-kazi/e-go-backend/internal/database"
 	"github.com/md-siam-kazi/e-go-backend/internal/feedback"
+	"github.com/md-siam-kazi/e-go-backend/internal/follow"
 	"github.com/md-siam-kazi/e-go-backend/internal/order"
+	"github.com/md-siam-kazi/e-go-backend/internal/settings"
 	"github.com/md-siam-kazi/e-go-backend/internal/storeapp"
 	"github.com/md-siam-kazi/e-go-backend/internal/vendor"
 	"github.com/md-siam-kazi/e-go-backend/pkg/imgbb"
@@ -28,6 +32,8 @@ func (s *Server) buildRouter() chi.Router {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
+	// Capture request metadata (IP, user agent, request id) for the audit trail.
+	r.Use(audit.Middleware)
 	r.Use(middleware.Logger(s.log))
 	r.Use(middleware.Recoverer(s.log))
 	r.Use(middleware.SecureHeaders)
@@ -62,6 +68,9 @@ func (s *Server) registerModules(api chi.Router) {
 	// Public storefront catalog (read-only, no auth).
 	catalog.Register(api, s.db)
 
+	// Public storefront settings (the announcement bar), read-only, no auth.
+	settings.RegisterPublic(api, s.db)
+
 	// Role checks are authoritative (read from user_roles), so a role change
 	// takes effect immediately and a user holding several roles is recognized
 	// for each of them.
@@ -94,7 +103,18 @@ func (s *Server) registerModules(api chi.Router) {
 	})
 
 	// Customer feedback (reviews + product questions) — authenticated writes.
-	feedback.Register(api, s.signer, s.db, ratelimit.New(s.redis))
+	feedback.Register(api, s.signer, s.db, ratelimit.New(s.redis), imgbb.New(s.cfg.Images.ImgBBAPIKey))
+
+	// Store follows — authenticated writes.
+	follow.Register(api, s.signer, s.db)
+
+	// Server-side cart — works for guests (session cookie) and signed-in users.
+	cart.Register(api, cart.Deps{
+		DB:          s.db,
+		Cfg:         s.cfg,
+		Signer:      s.signer,
+		RateLimiter: ratelimit.New(s.redis),
+	})
 
 	// Admin-only area: authenticate, then require the admin role.
 	api.Route("/admin", func(r chi.Router) {
@@ -102,6 +122,7 @@ func (s *Server) registerModules(api chi.Router) {
 		r.Use(auth.RequireRole(roleChecker, "admin"))
 		admin.Register(r, s.db)
 		storeapp.RegisterAdmin(r, storeappSvc)
+		settings.RegisterAdmin(r, s.db)
 	})
 
 	// Vendor-only area: authenticate, then require the vendor role.

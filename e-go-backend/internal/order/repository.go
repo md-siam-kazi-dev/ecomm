@@ -22,6 +22,8 @@ var errOrderNumberTaken = errors.New("order number taken")
 // OrderRepository is the persistence boundary for orders.
 type OrderRepository interface {
 	ResolveVariants(ctx context.Context, items []OrderItemInput) ([]VariantResolution, error)
+	CartItemsForUser(ctx context.Context, userID string) ([]ItemRequest, error)
+	ConvertUserCart(ctx context.Context, userID string) error
 	CreateOrder(ctx context.Context, p OrderParams) (Order, error)
 	DeleteOrder(ctx context.Context, orderID string) error
 	OrdersForUser(ctx context.Context, userID string, page, limit int) ([]Order, int64, error)
@@ -75,6 +77,47 @@ func (r *Repository) ResolveVariants(ctx context.Context, items []OrderItemInput
 	return out, nil
 }
 
+// CartItemsForUser loads the lines of the user's active server-side cart so a
+// checkout can be created from the cart instead of a client-supplied payload.
+func (r *Repository) CartItemsForUser(ctx context.Context, userID string) ([]ItemRequest, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT p.id::text, ci.variant_id::text, ci.quantity
+		FROM carts c
+		JOIN cart_items ci ON ci.cart_id = c.id
+		JOIN product_variants v ON v.id = ci.variant_id
+		JOIN products p ON p.id = v.product_id
+		WHERE c.user_id = $1 AND c.status = 'active'
+		ORDER BY ci.created_at, ci.id`, userID)
+	if err != nil {
+		return nil, apperr.ErrInternal.WithCause(err)
+	}
+	defer rows.Close()
+
+	items := make([]ItemRequest, 0)
+	for rows.Next() {
+		var item ItemRequest
+		if err := rows.Scan(&item.ProductID, &item.VariantID, &item.Quantity); err != nil {
+			return nil, apperr.ErrInternal.WithCause(err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, apperr.ErrInternal.WithCause(err)
+	}
+	return items, nil
+}
+
+// ConvertUserCart marks the user's active cart 'converted' after a successful
+// checkout, so it is no longer reused (the cart is emptied server-side).
+func (r *Repository) ConvertUserCart(ctx context.Context, userID string) error {
+	if _, err := r.db.Exec(ctx, `
+		UPDATE carts SET status = 'converted', updated_at = NOW()
+		WHERE user_id = $1 AND status = 'active'`, userID); err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+	return nil
+}
+
 // CreateOrder inserts the order, items, address, history and decrements stock
 // in a single transaction. Concurrent stock races are caught by the guarded
 // inventory update.
@@ -119,11 +162,12 @@ func (r *Repository) CreateOrder(ctx context.Context, p OrderParams) (Order, err
 		}
 
 		var locationID string
+		var stockAfter int
 		err := tx.QueryRow(ctx, `
 			UPDATE inventory SET quantity = quantity - $2, updated_at = NOW()
 			WHERE id = (SELECT id FROM inventory WHERE variant_id = $1 ORDER BY quantity DESC LIMIT 1)
 			  AND quantity >= $2
-			RETURNING location_id`, item.VariantID, quantity).Scan(&locationID)
+			RETURNING location_id, quantity`, item.VariantID, quantity).Scan(&locationID, &stockAfter)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Order{}, errInsufficientStock
 		}
@@ -132,9 +176,10 @@ func (r *Repository) CreateOrder(ctx context.Context, p OrderParams) (Order, err
 		}
 
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO inventory_movements (variant_id, location_id, movement_type, quantity, reference_type, reference_id, notes, created_by)
-			VALUES ($1, $2, 'sale', $3, 'order', $4, 'Order sale', $5)`,
-			item.VariantID, locationID, quantity, orderID, p.UserID,
+			INSERT INTO inventory_movements
+				(variant_id, location_id, movement_type, quantity, quantity_before, quantity_after, reference_type, reference_id, notes, created_by)
+			VALUES ($1, $2, 'sale', $3, $4, $5, 'order', $6, 'Order sale', $7)`,
+			item.VariantID, locationID, quantity, stockAfter+quantity, stockAfter, orderID, p.UserID,
 		); err != nil {
 			return Order{}, apperr.ErrInternal.WithCause(err)
 		}
@@ -461,6 +506,7 @@ func (r *Repository) attachItems(ctx context.Context, orders []Order, ids []stri
 	defer rows.Close()
 
 	byOrder := make(map[string][]OrderItem, len(orders))
+	reviewByID := make(map[string]*OrderItemReview)
 	for rows.Next() {
 		var (
 			orderID   string
@@ -483,11 +529,16 @@ func (r *Repository) attachItems(ctx context.Context, orders []Order, ids []stri
 				review.CreatedAt = *createdAt
 			}
 			item.Review = review
+			reviewByID[*reviewID] = review
 		}
 		byOrder[orderID] = append(byOrder[orderID], item)
 	}
 	if err := rows.Err(); err != nil {
 		return apperr.ErrInternal.WithCause(err)
+	}
+
+	if err := r.attachReviewImages(ctx, reviewByID); err != nil {
+		return err
 	}
 	for i := range orders {
 		if items, ok := byOrder[orders[i].ID]; ok {
@@ -501,6 +552,42 @@ func (r *Repository) attachItems(ctx context.Context, orders []Order, ids []stri
 
 func round2(v float64) float64 {
 	return math.Round(v*100) / 100
+}
+
+// attachReviewImages groups each review's photo URLs onto its OrderItemReview.
+func (r *Repository) attachReviewImages(ctx context.Context, byID map[string]*OrderItemReview) error {
+	if len(byID) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT review_id, image_url FROM review_images
+		WHERE review_id::text = ANY(string_to_array($1, ','))
+		ORDER BY review_id, sort_order`, strings.Join(ids, ","))
+	if err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			reviewID string
+			url      string
+		)
+		if err := rows.Scan(&reviewID, &url); err != nil {
+			return apperr.ErrInternal.WithCause(err)
+		}
+		if review, ok := byID[reviewID]; ok {
+			review.Images = append(review.Images, url)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+	return nil
 }
 
 func nullable(s string) *string {

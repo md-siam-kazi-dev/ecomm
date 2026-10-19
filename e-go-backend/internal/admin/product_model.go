@@ -23,6 +23,7 @@ type ReviewProduct struct {
 	ImageURL       string
 	ReviewNote     string
 	SubmittedAt    *time.Time
+	ReviewedAt     *time.Time
 	CreatedAt      time.Time
 }
 
@@ -56,6 +57,7 @@ type ReviewProductDetail struct {
 	VendorName       string
 	SubmittedAt      *time.Time
 	ApprovedAt       *time.Time
+	ReviewedAt       *time.Time
 	CreatedAt        time.Time
 }
 

@@ -6,6 +6,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/md-siam-kazi/e-go-backend/internal/audit"
 	"github.com/md-siam-kazi/e-go-backend/internal/auth"
 	"github.com/md-siam-kazi/e-go-backend/internal/config"
 	"github.com/md-siam-kazi/e-go-backend/pkg/jwt"
@@ -40,6 +41,7 @@ func BuildService(db *pgxpool.Pool, cfg *config.Config, registry *payment.Regist
 // and a public provider webhook.
 func Register(api chi.Router, signer *jwt.Signer, deps Deps) {
 	h := NewHandler(BuildService(deps.DB, deps.Cfg, deps.Registry, deps.FrontendURL))
+	h.audit = audit.NewRecorder(deps.DB)
 
 	// Public: verified server-to-server provider callback.
 	api.Post("/orders/webhook/{provider}", h.Webhook)

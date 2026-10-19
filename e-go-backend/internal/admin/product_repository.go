@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/md-siam-kazi/e-go-backend/internal/audit"
 	"github.com/md-siam-kazi/e-go-backend/pkg/apperr"
 )
 
@@ -60,7 +61,7 @@ func (r *Repository) ListForReview(ctx context.Context, q ReviewQuery) ([]Review
 		       COALESCE((SELECT pv.price FROM product_variants pv WHERE pv.product_id = p.id ORDER BY pv.created_at LIMIT 1), 0)::float8,
 		       COALESCE((SELECT SUM(i.quantity) FROM inventory i JOIN product_variants pv ON pv.id = i.variant_id WHERE pv.product_id = p.id), 0)::bigint,
 		       COALESCE((SELECT img.url FROM product_images img WHERE img.product_id = p.id ORDER BY img.is_primary DESC, img.sort_order LIMIT 1), ''),
-		       COALESCE(p.review_note, ''), p.submitted_at, p.created_at
+		       COALESCE(p.review_note, ''), p.submitted_at, p.reviewed_at, p.created_at
 		FROM products p
 		LEFT JOIN vendors v ON v.id = p.vendor_id
 	`+baseWhere+`
@@ -77,7 +78,7 @@ func (r *Repository) ListForReview(ctx context.Context, q ReviewQuery) ([]Review
 		var rec ReviewProduct
 		if err := rows.Scan(
 			&rec.ID, &rec.Name, &rec.VendorName, &rec.Status, &rec.ApprovalStatus,
-			&rec.Price, &rec.Stock, &rec.ImageURL, &rec.ReviewNote, &rec.SubmittedAt, &rec.CreatedAt,
+			&rec.Price, &rec.Stock, &rec.ImageURL, &rec.ReviewNote, &rec.SubmittedAt, &rec.ReviewedAt, &rec.CreatedAt,
 		); err != nil {
 			return nil, 0, apperr.ErrInternal.WithCause(err)
 		}
@@ -103,7 +104,7 @@ func (r *Repository) GetForReview(ctx context.Context, productID string) (Review
 		       p.status::text, p.approval_status::text,
 		       COALESCE(c.name, ''), COALESCE(b.name, ''),
 		       COALESCE(p.review_note, ''), COALESCE(v.business_name, ''),
-		       p.submitted_at, p.approved_at, p.created_at,
+		       p.submitted_at, p.approved_at, p.reviewed_at, p.created_at,
 		       COALESCE(p.attributes, '{}'::jsonb)
 		FROM products p
 		LEFT JOIN vendors v ON v.id = p.vendor_id
@@ -115,7 +116,7 @@ func (r *Repository) GetForReview(ctx context.Context, productID string) (Review
 	`, productID).Scan(
 		&d.ID, &d.Name, &d.Slug, &d.Description, &d.ShortDescription,
 		&d.Status, &d.ApprovalStatus, &d.Category, &d.Brand,
-		&d.ReviewNote, &d.VendorName, &d.SubmittedAt, &d.ApprovedAt, &d.CreatedAt, &rawAttrs,
+		&d.ReviewNote, &d.VendorName, &d.SubmittedAt, &d.ApprovedAt, &d.ReviewedAt, &d.CreatedAt, &rawAttrs,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ReviewProductDetail{}, errProductNotFound
@@ -169,44 +170,96 @@ func (r *Repository) GetForReview(ctx context.Context, productID string) (Review
 }
 
 // SetApproval applies an admin decision. Approve publishes (eligible); reject
-// and request-changes keep the product as a draft and store the note.
+// and request-changes keep the product as a draft and store the note. The state
+// change and its audit row are committed in a single transaction so a product
+// can never change without a matching audit entry.
 func (r *Repository) SetApproval(ctx context.Context, productID, adminID string, decision Decision, note string) error {
-	var (
-		tag pgconn.CommandTag
-		err error
-	)
-
-	switch decision {
-	case DecisionApprove:
-		tag, err = r.db.Exec(ctx, `
-			UPDATE products
-			SET status = 'active', approval_status = 'approved',
-			    approved_by = $2, approved_at = NOW(), review_note = NULL, updated_at = NOW()
-			WHERE id = $1
-		`, productID, adminID)
-	case DecisionReject:
-		tag, err = r.db.Exec(ctx, `
-			UPDATE products
-			SET status = 'draft', approval_status = 'rejected',
-			    approved_by = NULL, approved_at = NULL, review_note = $2, updated_at = NOW()
-			WHERE id = $1
-		`, productID, note)
-	case DecisionChanges:
-		tag, err = r.db.Exec(ctx, `
-			UPDATE products
-			SET status = 'draft', approval_status = 'changes_requested',
-			    approved_by = NULL, approved_at = NULL, review_note = $2, updated_at = NOW()
-			WHERE id = $1
-		`, productID, note)
-	default:
-		return apperr.ErrValidation
+	action, newStatus, newApproval, err := approvalOutcome(decision)
+	if err != nil {
+		return err
 	}
 
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var oldStatus, oldApproval string
+	err = tx.QueryRow(ctx, `
+		SELECT status::text, approval_status::text FROM products WHERE id = $1 FOR UPDATE
+	`, productID).Scan(&oldStatus, &oldApproval)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errProductNotFound
+	}
+	if err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+
+	var tag pgconn.CommandTag
+	reviewNote := any(nil)
+	switch decision {
+	case DecisionApprove:
+		tag, err = tx.Exec(ctx, `
+			UPDATE products
+			SET status = 'active', approval_status = 'approved',
+			    approved_by = $2, approved_at = NOW(), reviewed_by = $2, reviewed_at = NOW(),
+			    review_note = NULL, updated_at = NOW()
+			WHERE id = $1
+		`, productID, adminID)
+	default:
+		reviewNote = note
+		tag, err = tx.Exec(ctx, `
+			UPDATE products
+			SET status = 'draft', approval_status = $2,
+			    approved_by = NULL, approved_at = NULL, reviewed_by = $3, reviewed_at = NOW(),
+			    review_note = $4, updated_at = NOW()
+			WHERE id = $1
+		`, productID, newApproval, adminID, note)
+	}
 	if err != nil {
 		return apperr.ErrInternal.WithCause(err)
 	}
 	if tag.RowsAffected() == 0 {
 		return errProductNotFound
 	}
+
+	actorID := adminID
+	entityID := productID
+	if err := audit.Record(ctx, tx, audit.Event{
+		ActorID:    &actorID,
+		ActorRole:  audit.RoleAdmin,
+		Action:     action,
+		EntityType: audit.EntityProduct,
+		EntityID:   &entityID,
+		Result:     audit.ResultSuccess,
+		Reason:     note,
+		OldValues:  map[string]any{"status": oldStatus, "approval_status": oldApproval},
+		NewValues: map[string]any{
+			"status":          newStatus,
+			"approval_status": newApproval,
+			"review_note":     reviewNote,
+		},
+	}); err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
 	return nil
+}
+
+// approvalOutcome maps a decision to its audit action and resulting state.
+func approvalOutcome(decision Decision) (action, status, approval string, err error) {
+	switch decision {
+	case DecisionApprove:
+		return audit.ActionAdminProductApproved, "active", "approved", nil
+	case DecisionReject:
+		return audit.ActionAdminProductRejected, "draft", "rejected", nil
+	case DecisionChanges:
+		return audit.ActionAdminProductChangesRequested, "draft", "changes_requested", nil
+	default:
+		return "", "", "", apperr.ErrValidation
+	}
 }

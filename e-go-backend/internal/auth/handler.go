@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/md-siam-kazi/e-go-backend/internal/audit"
 	"github.com/md-siam-kazi/e-go-backend/internal/config"
 	"github.com/md-siam-kazi/e-go-backend/pkg/apperr"
 	"github.com/md-siam-kazi/e-go-backend/pkg/middleware"
@@ -20,10 +21,32 @@ type Handler struct {
 	authCfg    config.AuthConfig
 	accessTTL  time.Duration
 	refreshTTL time.Duration
+	// audit is optional; nil (e.g. in tests) disables security-event auditing.
+	audit *audit.Recorder
 }
 
 func NewHandler(svc *Service, authCfg config.AuthConfig, accessTTL, refreshTTL time.Duration) *Handler {
 	return &Handler{svc: svc, authCfg: authCfg, accessTTL: accessTTL, refreshTTL: refreshTTL}
+}
+
+// record writes a best-effort security audit event.
+func (h *Handler) record(r *http.Request, e audit.Event) {
+	if h.audit == nil {
+		return
+	}
+	_ = h.audit.Log(r.Context(), e)
+}
+
+// auditRole maps the auth package's effective role to an audit role.
+func auditRole(role string) string {
+	switch role {
+	case "admin":
+		return audit.RoleAdmin
+	case "vendor":
+		return audit.RoleVendor
+	default:
+		return audit.RoleCustomer
+	}
 }
 
 // Register handles POST /api/v1/auth/register.
@@ -39,6 +62,15 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.record(r, audit.Event{
+		ActorID:    &ack.ID,
+		ActorRole:  audit.RoleCustomer,
+		Action:     audit.ActionAuthRegistered,
+		EntityType: audit.EntityUser,
+		EntityID:   &ack.ID,
+		Result:     audit.ResultSuccess,
+	})
+
 	response.Created(w, ack, "Account created successfully")
 }
 
@@ -51,9 +83,27 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.svc.Login(r.Context(), req, clientMeta(r))
 	if err != nil {
+		h.record(r, audit.Event{
+			ActorRole:  audit.RoleCustomer,
+			Action:     audit.ActionAuthLoginFailed,
+			EntityType: audit.EntityUser,
+			Result:     audit.ResultFailure,
+			Reason:     "invalid_credentials",
+			Metadata:   map[string]any{"email": req.Email},
+		})
 		response.Error(w, r, err)
 		return
 	}
+
+	userID := result.User.ID
+	h.record(r, audit.Event{
+		ActorID:    &userID,
+		ActorRole:  auditRole(result.User.Role),
+		Action:     audit.ActionAuthLoginSuccess,
+		EntityType: audit.EntityUser,
+		EntityID:   &userID,
+		Result:     audit.ResultSuccess,
+	})
 
 	h.writeSessionCookies(w, result)
 	response.OK(w, userEnvelope{User: toUserResponse(result.User)}, "Signed in")
@@ -94,6 +144,14 @@ func (h *Handler) LogoutAll(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, r, err)
 		return
 	}
+	h.record(r, audit.Event{
+		ActorID:    &identity.UserID,
+		ActorRole:  auditRole(identity.Role),
+		Action:     audit.ActionAuthLoggedOutAll,
+		EntityType: audit.EntityUser,
+		EntityID:   &identity.UserID,
+		Result:     audit.ResultSuccess,
+	})
 	clearAuthCookies(w, h.authCfg)
 	response.NoContent(w)
 }
@@ -125,6 +183,12 @@ func (h *Handler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, r, err)
 		return
 	}
+	h.record(r, audit.Event{
+		ActorRole:  audit.RoleCustomer,
+		Action:     audit.ActionAuthEmailVerified,
+		EntityType: audit.EntityUser,
+		Result:     audit.ResultSuccess,
+	})
 	response.OK(w, nil, "Email verified")
 }
 
@@ -154,6 +218,12 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, r, err)
 		return
 	}
+	h.record(r, audit.Event{
+		ActorRole:  audit.RoleCustomer,
+		Action:     audit.ActionAuthPasswordReset,
+		EntityType: audit.EntityUser,
+		Result:     audit.ResultSuccess,
+	})
 	clearAuthCookies(w, h.authCfg)
 	response.OK(w, nil, "Password updated. Please sign in again.")
 }

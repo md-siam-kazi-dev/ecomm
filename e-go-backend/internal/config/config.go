@@ -63,6 +63,11 @@ type AuthConfig struct {
 	CookieSecure bool
 	// CookieDomain optionally scopes cookies to a parent domain.
 	CookieDomain string
+	// CookieSameSite controls the SameSite attribute on auth cookies:
+	// "lax" (default), "strict", or "none". Use "none" (together with
+	// COOKIE_SECURE=true) when the frontend is served from a different site
+	// than the API, for example a separate *.vercel.app domain.
+	CookieSameSite string
 	// FrontendURL is the browser origin used for CORS and for links in
 	// verification / password-reset emails.
 	FrontendURL string
@@ -120,9 +125,10 @@ type LogConfig struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		App: AppConfig{
-			Env:                 getEnv("APP_ENV", "development"),
-			Name:                getEnv("APP_NAME", "ShopKart"),
-			Port:                getEnv("APP_PORT", "8080"),
+			Env:  getEnv("APP_ENV", "development"),
+			Name: getEnv("APP_NAME", "ShopKart"),
+			// Vercel (and most PaaS) inject PORT; fall back to APP_PORT locally.
+			Port:                getEnv("PORT", getEnv("APP_PORT", "8080")),
 			ReadTimeout:         getEnvDuration("APP_READ_TIMEOUT", 15*time.Second),
 			WriteTimeout:        getEnvDuration("APP_WRITE_TIMEOUT", 15*time.Second),
 			IdleTimeout:         getEnvDuration("APP_IDLE_TIMEOUT", 60*time.Second),
@@ -158,9 +164,10 @@ func Load() (*Config, error) {
 			AllowedHeaders: getEnvSlice("CORS_ALLOWED_HEADERS", []string{"Authorization", "Content-Type", "Idempotency-Key", "X-Request-Id"}),
 		},
 		Auth: AuthConfig{
-			CookieSecure: getEnvBool("COOKIE_SECURE", false),
-			CookieDomain: getEnv("COOKIE_DOMAIN", ""),
-			FrontendURL:  getEnv("FRONTEND_URL", ""),
+			CookieSecure:   getEnvBool("COOKIE_SECURE", false),
+			CookieDomain:   getEnv("COOKIE_DOMAIN", ""),
+			CookieSameSite: getEnv("COOKIE_SAMESITE", "lax"),
+			FrontendURL:    getEnv("FRONTEND_URL", ""),
 		},
 		Images: ImageConfig{
 			ImgBBAPIKey: getEnv("IMGBB_API_KEY", ""),
@@ -215,6 +222,11 @@ func (c *Config) validate() error {
 		if len(c.JWT.AccessSecret) < 32 || len(c.JWT.RefreshSecret) < 32 {
 			return fmt.Errorf("config: JWT secrets must be at least 32 characters in production")
 		}
+	}
+	// A SameSite=None cookie is rejected by browsers unless it is also Secure,
+	// which would silently break authentication; fail fast instead.
+	if strings.EqualFold(strings.TrimSpace(c.Auth.CookieSameSite), "none") && !c.Auth.CookieSecure {
+		return fmt.Errorf("config: COOKIE_SAMESITE=none requires COOKIE_SECURE=true")
 	}
 	if c.Payment.ApplicationFeeEnabled {
 		if strings.TrimSpace(c.Payment.ApplicationFeeAmount) == "" {

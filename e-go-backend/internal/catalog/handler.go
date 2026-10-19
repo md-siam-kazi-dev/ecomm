@@ -81,6 +81,27 @@ func (h *Handler) Questions(w http.ResponseWriter, r *http.Request) {
 	response.List(w, items, pagination)
 }
 
+// GetStore handles GET /api/v1/stores/{slug}.
+func (h *Handler) GetStore(w http.ResponseWriter, r *http.Request) {
+	store, err := h.svc.Store(r.Context(), chi.URLParam(r, "slug"))
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+	response.OK(w, store, "")
+}
+
+// StoreProducts handles GET /api/v1/stores/{slug}/products.
+func (h *Handler) StoreProducts(w http.ResponseWriter, r *http.Request) {
+	query, _ := queryFrom(r)
+	items, pagination, err := h.svc.StoreProducts(r.Context(), chi.URLParam(r, "slug"), query)
+	if err != nil {
+		response.Error(w, r, err)
+		return
+	}
+	response.List(w, items, pagination)
+}
+
 // ListCategories handles GET /api/v1/categories.
 func (h *Handler) ListCategories(w http.ResponseWriter, r *http.Request) {
 	items, err := h.svc.Categories(r.Context())

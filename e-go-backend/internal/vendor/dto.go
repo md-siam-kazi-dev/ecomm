@@ -8,6 +8,9 @@ type ListQuery struct {
 	Limit  int
 	Search string
 	Status string
+	// VariantID and Type narrow the inventory-movement history.
+	VariantID string
+	Type      string
 }
 
 // ProductRequest is the create/update payload for a product. Any status,
@@ -48,6 +51,7 @@ type ProductItem struct {
 	ImageURL       string  `json:"image_url,omitempty"`
 	ReviewNote     string  `json:"review_note,omitempty"`
 	SubmittedAt    *string `json:"submitted_at,omitempty"`
+	ReviewedAt     *string `json:"reviewed_at,omitempty"`
 	CreatedAt      string  `json:"created_at"`
 }
 
@@ -73,6 +77,7 @@ type ProductDetailResponse struct {
 	VendorName       string                 `json:"vendor_name,omitempty"`
 	SubmittedAt      *string                `json:"submitted_at,omitempty"`
 	ApprovedAt       *string                `json:"approved_at,omitempty"`
+	ReviewedAt       *string                `json:"reviewed_at,omitempty"`
 	CreatedAt        string                 `json:"created_at"`
 }
 
@@ -129,6 +134,48 @@ type InventoryAdjustRequest struct {
 	Note     string `json:"note"`
 }
 
+// InventoryThresholdRequest sets a variant's low-stock threshold.
+type InventoryThresholdRequest struct {
+	ReorderLevel int `json:"reorder_level"`
+}
+
+// InventoryMovementItem is one entry in the vendor's stock history.
+type InventoryMovementItem struct {
+	ID             string `json:"id"`
+	VariantID      string `json:"variant_id"`
+	ProductID      string `json:"product_id"`
+	Name           string `json:"name"`
+	SKU            string `json:"sku"`
+	MovementType   string `json:"movement_type"`
+	Quantity       int64  `json:"quantity"`
+	QuantityBefore *int64 `json:"quantity_before,omitempty"`
+	QuantityAfter  *int64 `json:"quantity_after,omitempty"`
+	Notes          string `json:"notes,omitempty"`
+	ReferenceType  string `json:"reference_type,omitempty"`
+	OrderNumber    string `json:"order_number,omitempty"`
+	Actor          string `json:"actor,omitempty"`
+	CreatedAt      string `json:"created_at"`
+}
+
+func toInventoryMovementItem(r InventoryMovementRecord) InventoryMovementItem {
+	return InventoryMovementItem{
+		ID:             r.ID,
+		VariantID:      r.VariantID,
+		ProductID:      r.ProductID,
+		Name:           r.Name,
+		SKU:            r.SKU,
+		MovementType:   r.MovementType,
+		Quantity:       r.Quantity,
+		QuantityBefore: r.QuantityBefore,
+		QuantityAfter:  r.QuantityAfter,
+		Notes:          r.Notes,
+		ReferenceType:  r.ReferenceType,
+		OrderNumber:    r.OrderNumber,
+		Actor:          r.Actor,
+		CreatedAt:      r.CreatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
 func toInventoryItem(r InventoryRecord) InventoryItem {
 	return InventoryItem{
 		VariantID:    r.VariantID,
@@ -164,6 +211,7 @@ func toProductItem(r ProductRecord) ProductItem {
 		ImageURL:       r.ImageURL,
 		ReviewNote:     r.ReviewNote,
 		SubmittedAt:    fmtTime(r.SubmittedAt),
+		ReviewedAt:     fmtTime(r.ReviewedAt),
 		CreatedAt:      r.CreatedAt.UTC().Format(time.RFC3339),
 	}
 }
@@ -199,6 +247,7 @@ func toProductDetailResponse(d ProductDetail) ProductDetailResponse {
 		VendorName:       d.VendorName,
 		SubmittedAt:      fmtTime(d.SubmittedAt),
 		ApprovedAt:       fmtTime(d.ApprovedAt),
+		ReviewedAt:       fmtTime(d.ReviewedAt),
 		CreatedAt:        d.CreatedAt.UTC().Format(time.RFC3339),
 	}
 }

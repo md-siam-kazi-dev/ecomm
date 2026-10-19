@@ -74,7 +74,7 @@ func (s *ProductService) Approve(ctx context.Context, productID, adminID string)
 }
 
 // Reject keeps the product unpublished and stores the required reason.
-func (s *ProductService) Reject(ctx context.Context, productID, reason string) error {
+func (s *ProductService) Reject(ctx context.Context, adminID, productID, reason string) error {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return apperr.ErrValidation
@@ -82,11 +82,11 @@ func (s *ProductService) Reject(ctx context.Context, productID, reason string) e
 	if productID == "" {
 		return errProductNotFound
 	}
-	return s.repo.SetApproval(ctx, productID, "", DecisionReject, reason)
+	return s.repo.SetApproval(ctx, productID, adminID, DecisionReject, reason)
 }
 
 // RequestChanges keeps the product unpublished and stores the feedback.
-func (s *ProductService) RequestChanges(ctx context.Context, productID, note string) error {
+func (s *ProductService) RequestChanges(ctx context.Context, adminID, productID, note string) error {
 	note = strings.TrimSpace(note)
 	if note == "" {
 		return apperr.ErrValidation
@@ -94,5 +94,5 @@ func (s *ProductService) RequestChanges(ctx context.Context, productID, note str
 	if productID == "" {
 		return errProductNotFound
 	}
-	return s.repo.SetApproval(ctx, productID, "", DecisionChanges, note)
+	return s.repo.SetApproval(ctx, productID, adminID, DecisionChanges, note)
 }

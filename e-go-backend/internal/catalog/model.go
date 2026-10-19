@@ -10,6 +10,9 @@ import (
 // errProductNotFound is returned when a slug does not match a live product.
 var errProductNotFound = apperr.New(http.StatusNotFound, "PRODUCT_NOT_FOUND", "Product not found")
 
+// errStoreNotFound is returned when a slug does not match an active store.
+var errStoreNotFound = apperr.New(http.StatusNotFound, "STORE_NOT_FOUND", "Store not found")
+
 // ProductRecord is one catalog product row (with aggregates).
 type ProductRecord struct {
 	ID               string
@@ -26,6 +29,8 @@ type ProductRecord struct {
 	Category         string
 	CategorySlug     string
 	Brand            string
+	StoreName        string
+	StoreSlug        string
 	Rating           float64
 	ReviewCount      int64
 	SalesUnits       int64
@@ -37,6 +42,22 @@ type ProductRecord struct {
 	UpdatedAt        time.Time
 }
 
+// StoreRecord is a public storefront store profile with its aggregates.
+type StoreRecord struct {
+	ID            string
+	Name          string
+	Slug          string
+	Description   string
+	LogoURL       string
+	BannerURL     string
+	Category      string
+	ProductCount  int64
+	FollowerCount int64
+	ReviewCount   int64
+	PositiveCount int64
+	UpdatedAt     time.Time
+}
+
 // CategoryRecord is a storefront category with its live product count.
 type CategoryRecord struct {
 	ID           string
@@ -45,6 +66,7 @@ type CategoryRecord struct {
 	Description  string
 	ImageURL     string
 	ProductCount int64
+	UpdatedAt    time.Time
 }
 
 // ReviewRecord is a published review.
@@ -54,6 +76,7 @@ type ReviewRecord struct {
 	ProductName      string
 	ProductSlug      string
 	Author           string
+	AvatarURL        string
 	Rating           int
 	Title            string
 	Comment          string
@@ -61,6 +84,7 @@ type ReviewRecord struct {
 	HelpfulCount     int64
 	VendorReply      string
 	VendorRepliedAt  *time.Time
+	Images           []string
 	CreatedAt        time.Time
 }
 

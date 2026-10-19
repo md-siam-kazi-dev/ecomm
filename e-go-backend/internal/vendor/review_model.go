@@ -29,6 +29,7 @@ type VendorReviewRecord struct {
 	Rating          int
 	Title           string
 	Comment         string
+	Images          []string
 	CreatedAt       time.Time
 	VendorReply     string
 	VendorRepliedAt *time.Time

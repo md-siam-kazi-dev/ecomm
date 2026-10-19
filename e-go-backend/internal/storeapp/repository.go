@@ -11,10 +11,20 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/md-siam-kazi/e-go-backend/internal/audit"
 	"github.com/md-siam-kazi/e-go-backend/pkg/apperr"
 )
 
 const pgUniqueViolation = "23505"
+
+// Audit action names for store-application events. Kept stable because they are
+// surfaced verbatim in the application history timeline.
+const (
+	actionStoreApplicationSubmitted = "store_application.submitted"
+	actionStoreApplicationApproved  = "store_application.approved"
+	actionStoreApplicationRejected  = "store_application.rejected"
+	actionStoreActivated            = "store.activated"
+)
 
 // StoreRepository is the persistence boundary for the store-application module.
 type StoreRepository interface {
@@ -129,9 +139,16 @@ func (r *Repository) CreateApplication(ctx context.Context, p ApplicationParams)
 		return Application{}, apperr.ErrInternal.WithCause(err)
 	}
 	// Best-effort history entry; never blocks submission.
-	_, _ = r.db.Exec(ctx, `
-		INSERT INTO audit_logs (user_id, action, entity_type, entity_id)
-		VALUES ($1, 'store_application.submitted', 'store_application', $2)`, p.ApplicantUserID, id)
+	actorID := p.ApplicantUserID
+	entityID := id
+	_ = audit.Record(ctx, r.db, audit.Event{
+		ActorID:    &actorID,
+		ActorRole:  audit.RoleCustomer,
+		Action:     actionStoreApplicationSubmitted,
+		EntityType: audit.EntityStoreApplication,
+		EntityID:   &entityID,
+		Result:     audit.ResultSuccess,
+	})
 	return r.ApplicationByID(ctx, id)
 }
 
@@ -384,7 +401,7 @@ func (r *Repository) Approve(ctx context.Context, id, adminID string, feeEnabled
 		}
 	}
 
-	_ = insertAuditTx(ctx, tx, &adminID, "store_application.approved", id)
+	_ = insertAuditTx(ctx, tx, &adminID, audit.RoleAdmin, actionStoreApplicationApproved, id, "")
 	_ = insertNotificationTx(ctx, tx, applicantID, "vendor_approved",
 		"Store application approved",
 		fmt.Sprintf("Your store \"%s\" was approved. Complete the application fee to activate it.", storeName))
@@ -425,7 +442,7 @@ func (r *Repository) Reject(ctx context.Context, id, adminID, reason string) err
 		return apperr.ErrInternal.WithCause(err)
 	}
 
-	_ = insertAuditTx(ctx, tx, &adminID, "store_application.rejected", id)
+	_ = insertAuditTx(ctx, tx, &adminID, audit.RoleAdmin, actionStoreApplicationRejected, id, reason)
 	_ = insertNotificationTx(ctx, tx, applicantID, "vendor_rejected",
 		"Store application declined",
 		fmt.Sprintf("Your store application for \"%s\" was not approved.", storeName))
@@ -725,7 +742,7 @@ func (r *Repository) ActivateForApplication(ctx context.Context, applicationID s
 		return Store{}, err
 	}
 
-	_ = insertAuditTx(ctx, tx, nil, "store.activated", applicationID)
+	_ = insertAuditTx(ctx, tx, nil, audit.RoleSystem, actionStoreActivated, applicationID, "")
 	_ = insertNotificationTx(ctx, tx, applicantID, "payment_success",
 		"Your store is live",
 		fmt.Sprintf("Your store \"%s\" is active. Head to your vendor dashboard to start selling.", storeName))
@@ -865,11 +882,17 @@ func collectApplications(rows pgx.Rows) ([]Application, error) {
 	return records, nil
 }
 
-func insertAuditTx(ctx context.Context, tx pgx.Tx, actorID *string, action, entityID string) error {
-	_, err := tx.Exec(ctx, `
-		INSERT INTO audit_logs (user_id, action, entity_type, entity_id)
-		VALUES ($1, $2, 'store_application', $3)`, actorID, action, entityID)
-	return err
+func insertAuditTx(ctx context.Context, tx pgx.Tx, actorID *string, actorRole, action, entityID, reason string) error {
+	id := entityID
+	return audit.Record(ctx, tx, audit.Event{
+		ActorID:    actorID,
+		ActorRole:  actorRole,
+		Action:     action,
+		EntityType: audit.EntityStoreApplication,
+		EntityID:   &id,
+		Result:     audit.ResultSuccess,
+		Reason:     reason,
+	})
 }
 
 func insertNotificationTx(ctx context.Context, tx pgx.Tx, userID, ntype, title, message string) error {

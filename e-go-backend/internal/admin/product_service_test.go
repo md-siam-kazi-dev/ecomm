@@ -57,14 +57,14 @@ func TestProductService_Decisions(t *testing.T) {
 		t.Fatalf("approve not forwarded: %+v", repo)
 	}
 
-	if err := svc.Reject(context.Background(), "p-1", "Not as described"); err != nil {
+	if err := svc.Reject(context.Background(), "admin-1", "p-1", "Not as described"); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
 	if repo.lastDecision != DecisionReject || repo.lastNote != "Not as described" {
 		t.Fatalf("reject not forwarded: %+v", repo)
 	}
 
-	if err := svc.RequestChanges(context.Background(), "p-1", "Add clearer photos"); err != nil {
+	if err := svc.RequestChanges(context.Background(), "admin-1", "p-1", "Add clearer photos"); err != nil {
 		t.Fatalf("changes: %v", err)
 	}
 	if repo.lastDecision != DecisionChanges || repo.lastNote != "Add clearer photos" {
@@ -75,10 +75,10 @@ func TestProductService_Decisions(t *testing.T) {
 func TestProductService_RequiresReason(t *testing.T) {
 	svc := NewProductService(&fakeProductRepo{})
 
-	if err := svc.Reject(context.Background(), "p-1", "   "); apperrCode(err) != apperr.ErrValidation.Code {
+	if err := svc.Reject(context.Background(), "admin-1", "p-1", "   "); apperrCode(err) != apperr.ErrValidation.Code {
 		t.Errorf("reject without reason should be invalid, got %v", err)
 	}
-	if err := svc.RequestChanges(context.Background(), "p-1", ""); apperrCode(err) != apperr.ErrValidation.Code {
+	if err := svc.RequestChanges(context.Background(), "admin-1", "p-1", ""); apperrCode(err) != apperr.ErrValidation.Code {
 		t.Errorf("changes without note should be invalid, got %v", err)
 	}
 }

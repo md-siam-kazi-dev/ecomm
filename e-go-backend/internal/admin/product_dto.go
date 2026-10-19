@@ -14,6 +14,7 @@ type ReviewProductResponse struct {
 	ImageURL       string  `json:"image_url,omitempty"`
 	ReviewNote     string  `json:"review_note,omitempty"`
 	SubmittedAt    *string `json:"submitted_at,omitempty"`
+	ReviewedAt     *string `json:"reviewed_at,omitempty"`
 	CreatedAt      string  `json:"created_at"`
 }
 
@@ -47,6 +48,7 @@ type ReviewProductDetailResponse struct {
 	VendorName       string                `json:"vendor_name,omitempty"`
 	SubmittedAt      *string               `json:"submitted_at,omitempty"`
 	ApprovedAt       *string               `json:"approved_at,omitempty"`
+	ReviewedAt       *string               `json:"reviewed_at,omitempty"`
 	CreatedAt        string                `json:"created_at"`
 }
 
@@ -76,6 +78,7 @@ func toReviewProductResponse(r ReviewProduct) ReviewProductResponse {
 		ImageURL:       r.ImageURL,
 		ReviewNote:     r.ReviewNote,
 		SubmittedAt:    fmtTime(r.SubmittedAt),
+		ReviewedAt:     fmtTime(r.ReviewedAt),
 		CreatedAt:      r.CreatedAt.UTC().Format(time.RFC3339),
 	}
 }
@@ -109,6 +112,7 @@ func toReviewProductDetailResponse(d ReviewProductDetail) ReviewProductDetailRes
 		VendorName:       d.VendorName,
 		SubmittedAt:      fmtTime(d.SubmittedAt),
 		ApprovedAt:       fmtTime(d.ApprovedAt),
+		ReviewedAt:       fmtTime(d.ReviewedAt),
 		CreatedAt:        d.CreatedAt.UTC().Format(time.RFC3339),
 	}
 }

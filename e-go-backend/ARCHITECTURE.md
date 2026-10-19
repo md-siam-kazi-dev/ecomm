@@ -2928,3 +2928,47 @@ Added by `migrations/013_store_applications.sql`.
 - Payment status is kept separate from application status and store status.
 - Activation is idempotent (unique `stores.application_id` + guarded state
   transitions). Client-supplied amounts/statuses are never trusted.
+
+---
+
+# 67. Vendor Operations (migration 018)
+
+Added by `migrations/018_vendor_ops.sql`. Extends the existing vendor surface —
+no new tables.
+
+## Schema changes
+
+- `products` gains `reviewed_at` / `reviewed_by`, set by every admin decision
+  (`POST /admin/products/{id}/{approve|reject|changes}`), so a rejection or
+  change request carries a review timestamp and reviewer. `approved_by` /
+  `approved_at` remain approval-only.
+- `inventory_movements` gains `quantity_before` / `quantity_after`, so the stock
+  history shows the level before and after each change. Populated by the vendor
+  stock adjustment, initial product stock and order-sale writers; older rows
+  stay NULL.
+- Index `idx_inventory_movements_variant_created (variant_id, created_at DESC)`
+  backs the history view.
+
+## Endpoints (all under `/api/v1/vendor`, store-scoped)
+
+- `GET /inventory/movements` — stock history (paged; `variant_id`, `type`,
+  `search` filters).
+- `PUT /inventory/{variantId}/threshold` — set a variant's low-stock threshold.
+- `POST /orders/{id}/status` — forward fulfilment transitions (`confirmed`,
+  `processing`, `packed`, `shipped`, `delivered`); non-forward transitions are
+  rejected (`INVALID_TRANSITION`) and terminal orders are locked.
+- `GET /orders/export` and `GET /inventory/export` — CSV (default) or XLSX
+  (`?format=`), vendor-scoped, with CSV formula-injection neutralisation and a
+  10,000-row cap.
+
+## Side effects
+
+- **Notifications** — `internal/notify` writes in-app `notifications` rows.
+  Stock alerts fire only on a worsening crossing (ok → low → out), never on an
+  unchanged level. Order transitions notify the buyer (`order_confirmed`,
+  `order_shipped`, `order_delivered`); a failed delivery attempt notifies too.
+  In-app only: no email/SMS/push delivery worker exists yet.
+- **Audit** — order status/shipment changes and inventory threshold changes
+  write `audit_logs` rows.
+- **Courier boundary** — `pkg/courier` defines a provider interface with a
+  manual default (no fabricated tracking, no carrier API).

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/md-siam-kazi/e-go-backend/pkg/apperr"
+	"github.com/md-siam-kazi/e-go-backend/pkg/courier"
 	"github.com/md-siam-kazi/e-go-backend/pkg/imgbb"
 	"github.com/md-siam-kazi/e-go-backend/pkg/response"
 )
@@ -39,7 +40,13 @@ var allowedOrderStatuses = map[string]struct{}{
 }
 
 // allowedStockFilters are the valid values for the inventory stock filter.
-var allowedStockFilters = map[string]struct{}{"in": {}, "low": {}, "out": {}}
+var allowedStockFilters = map[string]struct{}{"in": {}, "low": {}, "out": {}, "unpublished": {}}
+
+// allowedMovementTypes are the valid values for the stock-history filter.
+var allowedMovementTypes = map[string]struct{}{
+	"purchase": {}, "sale": {}, "reservation": {}, "reservation_release": {},
+	"return": {}, "damage": {}, "adjustment": {}, "restock": {},
+}
 
 // errInvalidStock is returned for a bad stock adjustment.
 var errInvalidStock = apperr.New(http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Enter a whole stock count of 0 or more")
@@ -69,10 +76,11 @@ type ImageUploader interface {
 type Service struct {
 	repo     VendorRepository
 	uploader ImageUploader
+	couriers *courier.Registry
 }
 
 func NewService(repo VendorRepository, uploader ImageUploader) *Service {
-	return &Service{repo: repo, uploader: uploader}
+	return &Service{repo: repo, uploader: uploader, couriers: courier.Default()}
 }
 
 // scope resolves the store the caller may operate. Vendor requests are
@@ -264,6 +272,71 @@ func (s *Service) AdjustStock(ctx context.Context, userID, storeID, variantID st
 	return toInventoryItem(rec), nil
 }
 
+// ListInventoryMovements returns a page of the store's stock history.
+func (s *Service) ListInventoryMovements(ctx context.Context, userID, storeID string, q ListQuery) ([]InventoryMovementItem, response.Pagination, error) {
+	st, err := s.scope(ctx, userID, storeID)
+	if err != nil {
+		return nil, response.Pagination{}, err
+	}
+
+	page, limit := normalizePagination(q)
+	records, total, err := s.repo.ListInventoryMovements(ctx, st.VendorID, ListQuery{
+		Page: page, Limit: limit, Search: normalizeSearch(q.Search),
+		VariantID: strings.TrimSpace(q.VariantID), Type: normalizeMovementType(q.Type),
+	})
+	if err != nil {
+		return nil, response.Pagination{}, err
+	}
+
+	items := make([]InventoryMovementItem, 0, len(records))
+	for _, rec := range records {
+		items = append(items, toInventoryMovementItem(rec))
+	}
+	return items, response.Pagination{Page: page, Limit: limit, Total: total}, nil
+}
+
+// SetInventoryThreshold updates the low-stock threshold for a variant the store owns.
+func (s *Service) SetInventoryThreshold(ctx context.Context, userID, storeID, variantID string, req InventoryThresholdRequest) (InventoryItem, error) {
+	if req.ReorderLevel < 0 {
+		return InventoryItem{}, errInvalidStock
+	}
+
+	st, err := s.scope(ctx, userID, storeID)
+	if err != nil {
+		return InventoryItem{}, err
+	}
+
+	rec, err := s.repo.SetReorderLevel(ctx, st.VendorID, variantID, userID, req.ReorderLevel)
+	if err != nil {
+		return InventoryItem{}, err
+	}
+	return toInventoryItem(rec), nil
+}
+
+// ExportOrders returns the store's order lines for export.
+func (s *Service) ExportOrders(ctx context.Context, userID, storeID string, q ExportQuery) ([]ExportOrderRow, error) {
+	st, err := s.scope(ctx, userID, storeID)
+	if err != nil {
+		return nil, err
+	}
+	status := strings.ToLower(strings.TrimSpace(q.Status))
+	if _, ok := allowedOrderStatuses[status]; !ok {
+		status = ""
+	}
+	return s.repo.ExportOrders(ctx, st.VendorID, ExportQuery{Status: status, From: q.From, To: q.To})
+}
+
+// ExportInventory returns the store's inventory rows for export.
+func (s *Service) ExportInventory(ctx context.Context, userID, storeID string, q ListQuery) ([]ExportInventoryRow, error) {
+	st, err := s.scope(ctx, userID, storeID)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.ExportInventory(ctx, st.VendorID, ListQuery{
+		Search: normalizeSearch(q.Search), Status: normalizeStockFilter(q.Status),
+	})
+}
+
 // OrderDetail returns a store order with its items, address and shipment timeline.
 func (s *Service) OrderDetail(ctx context.Context, userID, storeID, orderID string) (OrderDetailResponse, error) {
 	st, err := s.scope(ctx, userID, storeID)
@@ -274,7 +347,7 @@ func (s *Service) OrderDetail(ctx context.Context, userID, storeID, orderID stri
 	if err != nil {
 		return OrderDetailResponse{}, err
 	}
-	return toOrderDetailResponse(rec), nil
+	return s.decorate(toOrderDetailResponse(rec)), nil
 }
 
 // AddShipmentEvent records a tracking update for the store's shipment and
@@ -288,14 +361,57 @@ func (s *Service) AddShipmentEvent(ctx context.Context, userID, storeID, orderID
 	if err != nil {
 		return OrderDetailResponse{}, err
 	}
-	if err := s.repo.UpsertShipmentEvent(ctx, st.VendorID, orderID, params); err != nil {
+	if err := s.repo.UpsertShipmentEvent(ctx, st.VendorID, orderID, userID, params); err != nil {
 		return OrderDetailResponse{}, err
 	}
 	rec, err := s.repo.OrderDetail(ctx, st.VendorID, orderID)
 	if err != nil {
 		return OrderDetailResponse{}, err
 	}
-	return toOrderDetailResponse(rec), nil
+	return s.decorate(toOrderDetailResponse(rec)), nil
+}
+
+// allowedOrderTransitions are the order statuses a vendor may set directly.
+var allowedOrderTransitions = map[string]struct{}{
+	"confirmed": {}, "processing": {}, "packed": {}, "shipped": {}, "delivered": {},
+}
+
+// SetOrderStatus applies an order-level fulfilment transition and returns the
+// refreshed order. Only forward transitions on the vendor's own orders are
+// allowed; the repository enforces both.
+func (s *Service) SetOrderStatus(ctx context.Context, userID, storeID, orderID string, req OrderStatusRequest) (OrderDetailResponse, error) {
+	status := strings.ToLower(strings.TrimSpace(req.Status))
+	if _, ok := allowedOrderTransitions[status]; !ok {
+		return OrderDetailResponse{}, errInvalidTransition
+	}
+
+	st, err := s.scope(ctx, userID, storeID)
+	if err != nil {
+		return OrderDetailResponse{}, err
+	}
+
+	note := strings.TrimSpace(req.Note)
+	if len(note) > maxNoteLength {
+		note = note[:maxNoteLength]
+	}
+
+	if err := s.repo.SetOrderStatus(ctx, st.VendorID, orderID, userID, status, note); err != nil {
+		return OrderDetailResponse{}, err
+	}
+	rec, err := s.repo.OrderDetail(ctx, st.VendorID, orderID)
+	if err != nil {
+		return OrderDetailResponse{}, err
+	}
+	return s.decorate(toOrderDetailResponse(rec)), nil
+}
+
+// decorate adds the courier tracking URL when a provider can build one (the
+// default manual provider cannot, so the field stays empty).
+func (s *Service) decorate(resp OrderDetailResponse) OrderDetailResponse {
+	if resp.Shipment != nil {
+		resp.Shipment.TrackingURL = s.couriers.TrackingURL("manual", resp.Shipment.Carrier, resp.Shipment.TrackingNumber)
+	}
+	return resp
 }
 
 // Revenue returns the store's revenue aggregate.
@@ -456,6 +572,14 @@ func trimBound(s string, max int) string {
 func normalizeStockFilter(v string) string {
 	v = strings.ToLower(strings.TrimSpace(v))
 	if _, ok := allowedStockFilters[v]; !ok {
+		return ""
+	}
+	return v
+}
+
+func normalizeMovementType(v string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if _, ok := allowedMovementTypes[v]; !ok {
 		return ""
 	}
 	return v

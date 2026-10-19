@@ -3,12 +3,14 @@ package vendor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/md-siam-kazi/e-go-backend/internal/notify"
 	"github.com/md-siam-kazi/e-go-backend/pkg/apperr"
 )
 
@@ -22,6 +24,13 @@ var errOrderNotFound = apperr.New(http.StatusNotFound, "ORDER_NOT_FOUND", "Order
 var errOrderFinalized = apperr.New(
 	http.StatusConflict, "ORDER_ALREADY_FINAL",
 	"This order is already delivered or closed and cannot be updated",
+)
+
+// errInvalidTransition is returned when an order status change does not move
+// the order forward.
+var errInvalidTransition = apperr.New(
+	http.StatusUnprocessableEntity, "INVALID_TRANSITION",
+	"That order status change is not allowed from the order's current status",
 )
 
 // nonRevenueOrderStatuses are excluded from revenue figures.
@@ -131,7 +140,7 @@ func (r *Repository) OrderDetail(ctx context.Context, vendorID, orderID string) 
 
 // UpsertShipmentEvent records a tracking update for the vendor's shipment of an
 // order, creating the shipment on first use, and advances the order status.
-func (r *Repository) UpsertShipmentEvent(ctx context.Context, vendorID, orderID string, p ShipmentParams) error {
+func (r *Repository) UpsertShipmentEvent(ctx context.Context, vendorID, orderID, actorID string, p ShipmentParams) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return apperr.ErrInternal.WithCause(err)
@@ -148,8 +157,8 @@ func (r *Repository) UpsertShipmentEvent(ctx context.Context, vendorID, orderID 
 		return errOrderNotFound
 	}
 
-	var currentOrderStatus string
-	if err := tx.QueryRow(ctx, `SELECT status::text FROM orders WHERE id = $1`, orderID).Scan(&currentOrderStatus); err != nil {
+	var currentOrderStatus, buyerID, orderNumber string
+	if err := tx.QueryRow(ctx, `SELECT status::text, user_id::text, order_number FROM orders WHERE id = $1`, orderID).Scan(&currentOrderStatus, &buyerID, &orderNumber); err != nil {
 		return apperr.ErrInternal.WithCause(err)
 	}
 
@@ -217,6 +226,21 @@ func (r *Repository) UpsertShipmentEvent(ctx context.Context, vendorID, orderID 
 		return apperr.ErrInternal.WithCause(err)
 	}
 
+	// A failed delivery attempt is a customer-facing exception.
+	if p.Status == "failed" {
+		if err := notify.Insert(ctx, tx, buyerID, "return_update", "Delivery attempt failed",
+			fmt.Sprintf("A delivery attempt for order %s was unsuccessful.", orderNumber),
+			map[string]any{"order_number": orderNumber}); err != nil {
+			return apperr.ErrInternal.WithCause(err)
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs (user_id, action, entity_type, entity_id)
+		VALUES ($1, 'order.shipment_updated', 'order', $2)`, actorID, orderID); err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+
 	// Advance the order status monotonically.
 	if next := orderStatusForShipment(p.Status); next != "" &&
 		orderStatusRank(next) > orderStatusRank(currentOrderStatus) {
@@ -224,14 +248,88 @@ func (r *Repository) UpsertShipmentEvent(ctx context.Context, vendorID, orderID 
 			return apperr.ErrInternal.WithCause(err)
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO order_status_history (order_id, old_status, new_status, notes)
-			VALUES ($1, $2::order_status, $3::order_status, 'Shipment update')
-		`, orderID, currentOrderStatus, next); err != nil {
+			INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, notes)
+			VALUES ($1, $2::order_status, $3::order_status, $4, 'Shipment update')
+		`, orderID, currentOrderStatus, next, actorID); err != nil {
+			return apperr.ErrInternal.WithCause(err)
+		}
+		if err := notifyOrderEvent(ctx, tx, buyerID, orderNumber, next); err != nil {
 			return apperr.ErrInternal.WithCause(err)
 		}
 	}
 
 	return tx.Commit(ctx)
+}
+
+// SetOrderStatus applies an order-level fulfilment transition (confirm,
+// process, pack, ship, deliver) for an order the vendor has items in. The
+// transition must move the order forward; terminal orders are rejected.
+func (r *Repository) SetOrderStatus(ctx context.Context, vendorID, orderID, actorID, status, note string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var current, buyerID, orderNumber string
+	err = tx.QueryRow(ctx, `
+		SELECT o.status::text, o.user_id::text, o.order_number
+		FROM orders o
+		WHERE o.id = $1
+		  AND EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = o.id AND oi.vendor_id = $2)
+	`, orderID, vendorID).Scan(&current, &buyerID, &orderNumber)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errOrderNotFound
+	}
+	if err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+
+	switch current {
+	case "delivered", "cancelled", "returned", "refunded":
+		return errOrderFinalized
+	}
+
+	if orderStatusRank(status) < 0 || orderStatusRank(status) <= orderStatusRank(current) {
+		return errInvalidTransition
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE orders SET status = $2::order_status, updated_at = NOW() WHERE id = $1`, orderID, status); err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, notes)
+		VALUES ($1, $2::order_status, $3::order_status, $4, NULLIF($5, ''))
+	`, orderID, current, status, actorID, note); err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs (user_id, action, entity_type, entity_id)
+		VALUES ($1, 'order.status_changed', 'order', $2)`, actorID, orderID); err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+	if err := notifyOrderEvent(ctx, tx, buyerID, orderNumber, status); err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+
+	return tx.Commit(ctx)
+}
+
+// notifyOrderEvent sends the buyer an in-app notification for a meaningful
+// order transition. Statuses without a customer-facing event are skipped.
+func notifyOrderEvent(ctx context.Context, q notify.Querier, buyerID, orderNumber, status string) error {
+	var ntype, title, message string
+	switch status {
+	case "confirmed":
+		ntype, title, message = "order_confirmed", "Order confirmed", fmt.Sprintf("Your order %s has been confirmed.", orderNumber)
+	case "shipped":
+		ntype, title, message = "order_shipped", "Order shipped", fmt.Sprintf("Your order %s is on its way.", orderNumber)
+	case "delivered":
+		ntype, title, message = "order_delivered", "Order delivered", fmt.Sprintf("Your order %s was delivered.", orderNumber)
+	default:
+		return nil
+	}
+	return notify.Insert(ctx, q, buyerID, ntype, title, message, map[string]any{"order_number": orderNumber})
 }
 
 // Revenue aggregates the vendor's revenue, series, top products and statuses.

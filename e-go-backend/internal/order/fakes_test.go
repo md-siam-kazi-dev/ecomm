@@ -35,10 +35,23 @@ type fakeRepo struct {
 	txnInserted  bool
 	confirmCalls int
 	confirmErr   error
+
+	cartItems     []ItemRequest
+	cartItemsErr  error
+	convertedUser string
 }
 
 func (f *fakeRepo) ResolveVariants(context.Context, []OrderItemInput) ([]VariantResolution, error) {
 	return f.resolved, f.resolveErr
+}
+
+func (f *fakeRepo) CartItemsForUser(context.Context, string) ([]ItemRequest, error) {
+	return f.cartItems, f.cartItemsErr
+}
+
+func (f *fakeRepo) ConvertUserCart(_ context.Context, userID string) error {
+	f.convertedUser = userID
+	return nil
 }
 
 func (f *fakeRepo) CreateOrder(_ context.Context, p OrderParams) (Order, error) {

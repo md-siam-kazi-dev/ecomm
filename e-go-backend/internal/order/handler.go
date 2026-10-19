@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/md-siam-kazi/e-go-backend/internal/audit"
 	"github.com/md-siam-kazi/e-go-backend/internal/auth"
 	"github.com/md-siam-kazi/e-go-backend/pkg/apperr"
 	"github.com/md-siam-kazi/e-go-backend/pkg/payment"
@@ -20,9 +21,31 @@ const maxWebhookBodyBytes = 1 << 20
 // Handler translates order HTTP requests into service calls.
 type Handler struct {
 	svc *Service
+	// audit is optional; nil (e.g. in tests) disables order-event auditing.
+	audit *audit.Recorder
 }
 
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+
+// record writes a best-effort audit event for the acting user.
+func (h *Handler) record(r *http.Request, e audit.Event) {
+	if h.audit == nil {
+		return
+	}
+	_ = h.audit.Log(r.Context(), e)
+}
+
+// auditRole maps an auth effective role to an audit role.
+func auditRole(role string) string {
+	switch role {
+	case "admin":
+		return audit.RoleAdmin
+	case "vendor":
+		return audit.RoleVendor
+	default:
+		return audit.RoleCustomer
+	}
+}
 
 // CreateOrder handles POST /api/v1/orders.
 func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +66,20 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, r, err)
 		return
 	}
+	orderID := out.Order.ID
+	h.record(r, audit.Event{
+		ActorID:    &id.UserID,
+		ActorRole:  auditRole(id.Role),
+		Action:     audit.ActionOrderCreated,
+		EntityType: audit.EntityOrder,
+		EntityID:   &orderID,
+		Result:     audit.ResultSuccess,
+		NewValues: map[string]any{
+			"order_number": out.Order.OrderNumber,
+			"status":       out.Order.Status,
+			"grand_total":  out.Order.GrandTotal,
+		},
+	})
 	response.Created(w, out, "Order placed")
 }
 

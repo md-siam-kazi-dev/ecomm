@@ -30,6 +30,7 @@ type ShipmentResponse struct {
 	ID             string  `json:"id"`
 	Carrier        string  `json:"carrier,omitempty"`
 	TrackingNumber string  `json:"tracking_number,omitempty"`
+	TrackingURL    string  `json:"tracking_url,omitempty"`
 	Status         string  `json:"status"`
 	ShippedAt      *string `json:"shipped_at,omitempty"`
 	DeliveredAt    *string `json:"delivered_at,omitempty"`
@@ -68,6 +69,12 @@ type ShipmentEventRequest struct {
 	Location       string `json:"location"`
 	Description    string `json:"description"`
 	EventTime      string `json:"event_time"`
+}
+
+// OrderStatusRequest is an order-level fulfilment transition.
+type OrderStatusRequest struct {
+	Status string `json:"status"`
+	Note   string `json:"note"`
 }
 
 // RevenuePointResponse is one month of the revenue series.

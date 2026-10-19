@@ -148,6 +148,26 @@ func (s *Service) TopReviews(ctx context.Context, limit int) ([]ReviewDTO, error
 	return toReviewDTOs(records), nil
 }
 
+// Store returns one active store's public profile.
+func (s *Service) Store(ctx context.Context, slug string) (StoreDTO, error) {
+	rec, err := s.repo.StoreBySlug(ctx, slug)
+	if err != nil {
+		return StoreDTO{}, err
+	}
+	return toStoreDTO(rec), nil
+}
+
+// StoreProducts returns a page of an active store's live products.
+func (s *Service) StoreProducts(ctx context.Context, slug string, q ListQuery) ([]ProductDTO, response.Pagination, error) {
+	q = normalizeQuery(q)
+
+	records, total, err := s.repo.StoreProducts(ctx, slug, q)
+	if err != nil {
+		return nil, response.Pagination{}, err
+	}
+	return toProductDTOs(records), response.Pagination{Page: q.Page, Limit: q.Limit, Total: total}, nil
+}
+
 func toProductDTOs(records []ProductRecord) []ProductDTO {
 	items := make([]ProductDTO, 0, len(records))
 	for _, rec := range records {

@@ -59,10 +59,17 @@ func (r *Repository) EligibleOrderItem(ctx context.Context, userID, orderItemID 
 	return e, nil
 }
 
-// CreateReview publishes a review. The unique order_item_id index makes this
-// idempotent-safe: a duplicate returns errReviewExists.
+// CreateReview publishes a review with its optional photos. The unique
+// order_item_id index makes this idempotent-safe: a duplicate returns
+// errReviewExists.
 func (r *Repository) CreateReview(ctx context.Context, p ReviewParams) (ReviewRecord, error) {
-	rec, err := scanReview(r.db.QueryRow(ctx, `
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return ReviewRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rec, err := scanReview(tx.QueryRow(ctx, `
 		INSERT INTO reviews (product_id, user_id, order_item_id, rating, title, content, status)
 		VALUES ($1, $2, $3, $4, $5, $6, 'published')
 		ON CONFLICT (order_item_id) DO NOTHING
@@ -74,12 +81,26 @@ func (r *Repository) CreateReview(ctx context.Context, p ReviewParams) (ReviewRe
 	if err != nil {
 		return ReviewRecord{}, apperr.ErrInternal.WithCause(err)
 	}
+
+	if err := insertReviewImages(ctx, tx, rec.ID, p.Images); err != nil {
+		return ReviewRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ReviewRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+	rec.Images = cloneImages(p.Images)
 	return rec, nil
 }
 
-// UpdateReview edits the caller's own review.
+// UpdateReview edits the caller's own review and replaces its photos.
 func (r *Repository) UpdateReview(ctx context.Context, userID, reviewID string, p ReviewParams) (ReviewRecord, error) {
-	rec, err := scanReview(r.db.QueryRow(ctx, `
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return ReviewRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rec, err := scanReview(tx.QueryRow(ctx, `
 		UPDATE reviews
 		SET rating = $3, title = $4, content = $5, updated_at = NOW()
 		WHERE id = $1 AND user_id = $2
@@ -91,7 +112,36 @@ func (r *Repository) UpdateReview(ctx context.Context, userID, reviewID string, 
 	if err != nil {
 		return ReviewRecord{}, apperr.ErrInternal.WithCause(err)
 	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM review_images WHERE review_id = $1`, reviewID); err != nil {
+		return ReviewRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+	if err := insertReviewImages(ctx, tx, reviewID, p.Images); err != nil {
+		return ReviewRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ReviewRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+	rec.Images = cloneImages(p.Images)
 	return rec, nil
+}
+
+// insertReviewImages stores a review's photos in display order.
+func insertReviewImages(ctx context.Context, tx pgx.Tx, reviewID string, images []string) error {
+	for i, url := range images {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO review_images (review_id, image_url, sort_order)
+			VALUES ($1, $2, $3)`, reviewID, url, i); err != nil {
+			return apperr.ErrInternal.WithCause(err)
+		}
+	}
+	return nil
+}
+
+func cloneImages(images []string) []string {
+	out := make([]string, len(images))
+	copy(out, images)
+	return out
 }
 
 // LiveProductIDBySlug resolves a publicly visible product to its id.

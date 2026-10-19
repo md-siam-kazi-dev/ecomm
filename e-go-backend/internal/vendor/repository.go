@@ -3,6 +3,7 @@ package vendor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/md-siam-kazi/e-go-backend/internal/notify"
 	"github.com/md-siam-kazi/e-go-backend/pkg/apperr"
 )
 
@@ -32,10 +34,15 @@ type VendorRepository interface {
 	GetProduct(ctx context.Context, vendorID, productID string) (ProductDetail, error)
 	ListOrders(ctx context.Context, vendorID string, q ListQuery) ([]OrderRecord, int64, error)
 	OrderDetail(ctx context.Context, vendorID, orderID string) (OrderDetailRecord, error)
-	UpsertShipmentEvent(ctx context.Context, vendorID, orderID string, p ShipmentParams) error
+	UpsertShipmentEvent(ctx context.Context, vendorID, orderID, actorID string, p ShipmentParams) error
+	SetOrderStatus(ctx context.Context, vendorID, orderID, actorID, status, note string) error
 	Revenue(ctx context.Context, vendorID string) (RevenueSummary, error)
 	ListInventory(ctx context.Context, vendorID string, q ListQuery) ([]InventoryRecord, int64, error)
+	ListInventoryMovements(ctx context.Context, vendorID string, q ListQuery) ([]InventoryMovementRecord, int64, error)
+	SetReorderLevel(ctx context.Context, vendorID, variantID, userID string, level int) (InventoryRecord, error)
 	AdjustStock(ctx context.Context, vendorID, variantID, userID string, quantity int, note string) (InventoryRecord, error)
+	ExportOrders(ctx context.Context, vendorID string, q ExportQuery) ([]ExportOrderRow, error)
+	ExportInventory(ctx context.Context, vendorID string, q ListQuery) ([]ExportInventoryRow, error)
 	ListReviews(ctx context.Context, vendorID string, q ListQuery) ([]VendorReviewRecord, int64, error)
 	ReviewSummary(ctx context.Context, vendorID string) (ReviewSummaryRecord, error)
 	ReplyToReview(ctx context.Context, vendorID, reviewID, reply string) (VendorReviewRecord, error)
@@ -146,7 +153,7 @@ func (r *Repository) ListProducts(ctx context.Context, vendorID string, q ListQu
 	listArgs := append(append([]any{}, args...), q.Limit, (q.Page-1)*q.Limit)
 	query := `
 		SELECT p.id, p.name, p.slug, p.status::text, p.approval_status::text, p.created_at,
-		       COALESCE(p.review_note, ''), p.submitted_at,
+		       COALESCE(p.review_note, ''), p.submitted_at, p.reviewed_at,
 		       COALESCE((SELECT v.price FROM product_variants v WHERE v.product_id = p.id ORDER BY v.created_at LIMIT 1), 0)::float8,
 		       COALESCE((SELECT SUM(i.quantity) FROM inventory i JOIN product_variants v ON v.id = i.variant_id WHERE v.product_id = p.id), 0)::bigint,
 		       COALESCE((SELECT img.url FROM product_images img WHERE img.product_id = p.id ORDER BY img.is_primary DESC, img.sort_order LIMIT 1), '')
@@ -166,7 +173,7 @@ func (r *Repository) ListProducts(ctx context.Context, vendorID string, q ListQu
 		var rec ProductRecord
 		if err := rows.Scan(
 			&rec.ID, &rec.Name, &rec.Slug, &rec.Status, &rec.ApprovalStatus, &rec.CreatedAt,
-			&rec.ReviewNote, &rec.SubmittedAt, &rec.Price, &rec.Stock, &rec.ImageURL,
+			&rec.ReviewNote, &rec.SubmittedAt, &rec.ReviewedAt, &rec.Price, &rec.Stock, &rec.ImageURL,
 		); err != nil {
 			return nil, 0, apperr.ErrInternal.WithCause(err)
 		}
@@ -288,6 +295,8 @@ func buildInventoryFilter(vendorID string, q ListQuery) (where, having string, a
 	case "in":
 		args = append(args, lowStockThreshold)
 		having = " HAVING COALESCE(SUM(i.quantity), 0) > $" + strconv.Itoa(len(args))
+	case "unpublished":
+		where += " AND (p.status <> 'active' OR p.approval_status <> 'approved')"
 	}
 
 	return where, having, args
@@ -347,11 +356,13 @@ func (r *Repository) AdjustStock(ctx context.Context, vendorID, variantID, userI
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var ownerID string
+	var ownerID, productName, sku, vendorUserID string
 	err = tx.QueryRow(ctx, `
-		SELECT p.vendor_id FROM product_variants v
+		SELECT p.vendor_id, p.name, COALESCE(v.sku, ''), vd.user_id::text
+		FROM product_variants v
 		JOIN products p ON p.id = v.product_id
-		WHERE v.id = $1`, variantID).Scan(&ownerID)
+		JOIN vendors vd ON vd.id = p.vendor_id
+		WHERE v.id = $1`, variantID).Scan(&ownerID, &productName, &sku, &vendorUserID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return InventoryRecord{}, errProductNotFound
 	}
@@ -367,12 +378,12 @@ func (r *Repository) AdjustStock(ctx context.Context, vendorID, variantID, userI
 		return InventoryRecord{}, err
 	}
 
-	var current, reserved int
+	var current, reserved, reorder int
 	err = tx.QueryRow(ctx, `
-		SELECT quantity, reserved_quantity FROM inventory
-		WHERE variant_id = $1 AND location_id = $2`, variantID, locationID).Scan(&current, &reserved)
+		SELECT quantity, reserved_quantity, reorder_level FROM inventory
+		WHERE variant_id = $1 AND location_id = $2`, variantID, locationID).Scan(&current, &reserved, &reorder)
 	if errors.Is(err, pgx.ErrNoRows) {
-		current, reserved = 0, 0
+		current, reserved, reorder = 0, 0, 0
 	} else if err != nil {
 		return InventoryRecord{}, apperr.ErrInternal.WithCause(err)
 	}
@@ -400,9 +411,23 @@ func (r *Repository) AdjustStock(ctx context.Context, vendorID, variantID, userI
 			notes = &trimmed
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO inventory_movements (variant_id, location_id, movement_type, quantity, notes, created_by)
-			VALUES ($1, $2, $3::inventory_movement_type, $4, $5, $6)`,
-			variantID, locationID, movement, absInt(delta), notes, userID); err != nil {
+			INSERT INTO inventory_movements
+				(variant_id, location_id, movement_type, quantity, quantity_before, quantity_after, notes, created_by)
+			VALUES ($1, $2, $3::inventory_movement_type, $4, $5, $6, $7, $8)`,
+			variantID, locationID, movement, absInt(delta), current, quantity, notes, userID); err != nil {
+			return InventoryRecord{}, apperr.ErrInternal.WithCause(err)
+		}
+	}
+
+	// Alert the vendor when stock worsens into "low" or "out". This fires only
+	// on a crossing, so an unchanged condition never re-notifies.
+	if stockSeverity(quantity, reorder) > stockSeverity(current, reorder) {
+		title, message := stockAlert(productName, sku, quantity, reorder)
+		if err := notify.Insert(ctx, tx, vendorUserID, "system", title, message, map[string]any{
+			"variant_id": variantID,
+			"sku":        sku,
+			"quantity":   quantity,
+		}); err != nil {
 			return InventoryRecord{}, apperr.ErrInternal.WithCause(err)
 		}
 	}
@@ -411,6 +436,30 @@ func (r *Repository) AdjustStock(ctx context.Context, vendorID, variantID, userI
 		return InventoryRecord{}, apperr.ErrInternal.WithCause(err)
 	}
 	return r.inventoryByVariant(ctx, vendorID, variantID)
+}
+
+// stockSeverity ranks a stock level: 0 ok, 1 low, 2 out.
+func stockSeverity(quantity, reorder int) int {
+	switch {
+	case quantity <= 0:
+		return 2
+	case reorder > 0 && quantity <= reorder:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// stockAlert builds the notification title/message for a worsening stock level.
+func stockAlert(name, sku string, quantity, reorder int) (string, string) {
+	label := name
+	if sku != "" {
+		label = fmt.Sprintf("%s (%s)", name, sku)
+	}
+	if quantity <= 0 {
+		return "Out of stock", fmt.Sprintf("%s is out of stock.", label)
+	}
+	return "Low stock", fmt.Sprintf("%s is down to %d units (threshold %d).", label, quantity, reorder)
 }
 
 // inventoryByVariant loads one variant's inventory aggregate for the vendor.
@@ -430,6 +479,122 @@ func (r *Repository) inventoryByVariant(ctx context.Context, vendorID, variantID
 		return InventoryRecord{}, apperr.ErrInternal.WithCause(err)
 	}
 	return rec, nil
+}
+
+// ListInventoryMovements returns one page of the vendor's stock movements,
+// newest first, with the stock level before and after each change.
+func (r *Repository) ListInventoryMovements(ctx context.Context, vendorID string, q ListQuery) ([]InventoryMovementRecord, int64, error) {
+	args := []any{vendorID}
+	where := " WHERE p.vendor_id = $1"
+	if q.VariantID != "" {
+		args = append(args, q.VariantID)
+		where += " AND m.variant_id = $" + strconv.Itoa(len(args))
+	}
+	if q.Type != "" {
+		args = append(args, q.Type)
+		where += " AND m.movement_type = $" + strconv.Itoa(len(args)) + "::inventory_movement_type"
+	}
+	if q.Search != "" {
+		args = append(args, "%"+q.Search+"%")
+		place := "$" + strconv.Itoa(len(args))
+		where += " AND (p.name ILIKE " + place + " OR v.sku ILIKE " + place + ")"
+	}
+
+	const from = `
+		FROM inventory_movements m
+		JOIN product_variants v ON v.id = m.variant_id
+		JOIN products p ON p.id = v.product_id
+		LEFT JOIN orders o ON m.reference_type = 'order' AND o.id = m.reference_id
+		LEFT JOIN users u ON u.id = m.created_by
+		LEFT JOIN user_profiles up ON up.user_id = u.id`
+
+	var total int64
+	if err := r.db.QueryRow(ctx, `SELECT count(*)`+from+where, args...).Scan(&total); err != nil {
+		return nil, 0, apperr.ErrInternal.WithCause(err)
+	}
+	if total == 0 {
+		return []InventoryMovementRecord{}, 0, nil
+	}
+
+	listArgs := append(append([]any{}, args...), q.Limit, (q.Page-1)*q.Limit)
+	rows, err := r.db.Query(ctx, `
+		SELECT m.id, v.id, p.id, p.name, v.sku, m.movement_type::text, m.quantity,
+		       m.quantity_before, m.quantity_after, COALESCE(m.notes, ''),
+		       COALESCE(m.reference_type, ''), COALESCE(o.order_number, ''),
+		       COALESCE(NULLIF(TRIM(CONCAT_WS(' ', up.first_name, up.last_name)), ''),
+		                split_part(COALESCE(u.email, ''), '@', 1), ''),
+		       m.created_at`+from+where+`
+		ORDER BY m.created_at DESC, m.id DESC
+		LIMIT $`+strconv.Itoa(len(args)+1)+` OFFSET $`+strconv.Itoa(len(args)+2), listArgs...)
+	if err != nil {
+		return nil, 0, apperr.ErrInternal.WithCause(err)
+	}
+	defer rows.Close()
+
+	records := make([]InventoryMovementRecord, 0, q.Limit)
+	for rows.Next() {
+		var rec InventoryMovementRecord
+		if err := rows.Scan(
+			&rec.ID, &rec.VariantID, &rec.ProductID, &rec.Name, &rec.SKU, &rec.MovementType,
+			&rec.Quantity, &rec.QuantityBefore, &rec.QuantityAfter, &rec.Notes,
+			&rec.ReferenceType, &rec.OrderNumber, &rec.Actor, &rec.CreatedAt,
+		); err != nil {
+			return nil, 0, apperr.ErrInternal.WithCause(err)
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, apperr.ErrInternal.WithCause(err)
+	}
+	return records, total, nil
+}
+
+// SetReorderLevel updates the low-stock threshold for a variant the vendor owns.
+func (r *Repository) SetReorderLevel(ctx context.Context, vendorID, variantID, userID string, level int) (InventoryRecord, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return InventoryRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var owned bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM product_variants v
+			JOIN products p ON p.id = v.product_id
+			WHERE v.id = $1 AND p.vendor_id = $2
+		)`, variantID, vendorID).Scan(&owned); err != nil {
+		return InventoryRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+	if !owned {
+		return InventoryRecord{}, errProductNotFound
+	}
+
+	locationID, err := ensureLocation(ctx, tx, vendorID)
+	if err != nil {
+		return InventoryRecord{}, err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO inventory (variant_id, location_id, quantity, reorder_level)
+		VALUES ($1, $2, 0, $3)
+		ON CONFLICT (variant_id, location_id)
+		DO UPDATE SET reorder_level = EXCLUDED.reorder_level, updated_at = NOW()`,
+		variantID, locationID, level); err != nil {
+		return InventoryRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs (user_id, action, entity_type, entity_id)
+		VALUES ($1, 'inventory.threshold_changed', 'product_variant', $2)`,
+		userID, variantID); err != nil {
+		return InventoryRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return InventoryRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+	return r.inventoryByVariant(ctx, vendorID, variantID)
 }
 
 func absInt(n int) int {

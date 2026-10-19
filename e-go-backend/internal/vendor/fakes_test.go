@@ -39,17 +39,30 @@ type fakeRepo struct {
 	lastOrderDetailID string
 	lastShipment      ShipmentParams
 	shipmentErr       error
+	lastOrderStatus   string
+	orderStatusErr    error
 	revenue           RevenueSummary
 	revenueErr        error
 
-	reviews         []VendorReviewRecord
-	reviewsTotal    int64
-	lastReviewQuery ListQuery
-	summary         ReviewSummaryRecord
-	summaryErr      error
-	replyRecord     VendorReviewRecord
-	replyErr        error
-	lastReply       string
+	movements          []InventoryMovementRecord
+	movementsTotal     int64
+	lastMovementsQuery ListQuery
+	thresholdRecord    InventoryRecord
+	thresholdErr       error
+	lastThresholdVar   string
+	lastThresholdLevel int
+
+	exportOrders    []ExportOrderRow
+	exportInventory []ExportInventoryRow
+
+	reviews          []VendorReviewRecord
+	reviewsTotal     int64
+	lastReviewQuery  ListQuery
+	reviewSummary    ReviewSummaryRecord
+	reviewSummaryErr error
+	replyRecord      VendorReviewRecord
+	replyErr         error
+	lastReply        string
 
 	questions         []VendorQuestionRecord
 	questionsTotal    int64
@@ -67,9 +80,35 @@ func (f *fakeRepo) OrderDetail(_ context.Context, _, orderID string) (OrderDetai
 	return f.orderDetail, nil
 }
 
-func (f *fakeRepo) UpsertShipmentEvent(_ context.Context, _, orderID string, p ShipmentParams) error {
+func (f *fakeRepo) UpsertShipmentEvent(_ context.Context, _, orderID, _ string, p ShipmentParams) error {
 	f.lastShipment, f.lastOrderDetailID = p, orderID
 	return f.shipmentErr
+}
+
+func (f *fakeRepo) SetOrderStatus(_ context.Context, _, orderID, _, status, _ string) error {
+	f.lastOrderStatus, f.lastOrderDetailID = status, orderID
+	return f.orderStatusErr
+}
+
+func (f *fakeRepo) ListInventoryMovements(_ context.Context, _ string, q ListQuery) ([]InventoryMovementRecord, int64, error) {
+	f.lastMovementsQuery = q
+	return f.movements, f.movementsTotal, nil
+}
+
+func (f *fakeRepo) SetReorderLevel(_ context.Context, _, variantID, _ string, level int) (InventoryRecord, error) {
+	f.lastThresholdVar, f.lastThresholdLevel = variantID, level
+	if f.thresholdErr != nil {
+		return InventoryRecord{}, f.thresholdErr
+	}
+	return f.thresholdRecord, nil
+}
+
+func (f *fakeRepo) ExportOrders(_ context.Context, _ string, _ ExportQuery) ([]ExportOrderRow, error) {
+	return f.exportOrders, nil
+}
+
+func (f *fakeRepo) ExportInventory(_ context.Context, _ string, _ ListQuery) ([]ExportInventoryRow, error) {
+	return f.exportInventory, nil
 }
 
 func (f *fakeRepo) Revenue(_ context.Context, _ string) (RevenueSummary, error) {
@@ -164,10 +203,10 @@ func (f *fakeRepo) ListReviews(_ context.Context, _ string, q ListQuery) ([]Vend
 }
 
 func (f *fakeRepo) ReviewSummary(_ context.Context, _ string) (ReviewSummaryRecord, error) {
-	if f.summaryErr != nil {
-		return ReviewSummaryRecord{}, f.summaryErr
+	if f.reviewSummaryErr != nil {
+		return ReviewSummaryRecord{}, f.reviewSummaryErr
 	}
-	return f.summary, nil
+	return f.reviewSummary, nil
 }
 
 func (f *fakeRepo) ReplyToReview(_ context.Context, _, _ string, reply string) (VendorReviewRecord, error) {

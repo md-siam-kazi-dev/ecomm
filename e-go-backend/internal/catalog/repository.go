@@ -19,10 +19,17 @@ type CatalogRepository interface {
 	ProductBySlug(ctx context.Context, slug string) (ProductRecord, error)
 	RelatedProducts(ctx context.Context, slug string, limit int) ([]ProductRecord, error)
 	ListCategories(ctx context.Context) ([]CategoryRecord, error)
+	StoreBySlug(ctx context.Context, slug string) (StoreRecord, error)
+	StoreProducts(ctx context.Context, slug string, q ListQuery) ([]ProductRecord, int64, error)
 	ProductReviews(ctx context.Context, slug string, page, limit int) ([]ReviewRecord, int64, error)
 	ProductRating(ctx context.Context, slug string) (RatingSummaryRecord, error)
 	ProductQuestions(ctx context.Context, slug string, page, limit int) ([]QuestionRecord, int64, error)
 	TopReviews(ctx context.Context, limit int) ([]ReviewRecord, error)
+	// SitemapProducts and SitemapStores are the keyset scans backing the public
+	// sitemap endpoints. They return only indexable rows plus the total count of
+	// indexable rows, ignoring the cursor (see sitemap_repository.go).
+	SitemapProducts(ctx context.Context, cursor SitemapCursor, limit int) ([]SitemapRecord, int64, error)
+	SitemapStores(ctx context.Context, cursor SitemapCursor, limit int) ([]SitemapRecord, int64, error)
 }
 
 // Repository persists catalog data in PostgreSQL.
@@ -41,6 +48,7 @@ const catalogFrom = `
 	LEFT JOIN brands b ON b.id = p.brand_id
 	LEFT JOIN product_categories pc ON pc.product_id = p.id
 	LEFT JOIN categories c ON c.id = pc.category_id
+	LEFT JOIN stores shop ON shop.vendor_id = p.vendor_id AND shop.status = 'active'
 	LEFT JOIN LATERAL (
 		SELECT url, COALESCE(alt_text, '') AS alt_text FROM product_images pi
 		WHERE pi.product_id = p.id ORDER BY pi.is_primary DESC, pi.sort_order LIMIT 1
@@ -67,6 +75,7 @@ const catalogColumns = `
 	COALESCE(pr.price, 0) AS price, pr.compare_at AS compare_at_price, COALESCE(pr.sku, ''),
 	COALESCE(st.qty, 0) AS stock, COALESCE(img.url, ''), COALESCE(img.alt_text, ''),
 	COALESCE(c.name, ''), COALESCE(c.slug, ''), COALESCE(b.name, ''),
+	COALESCE(shop.name, ''), COALESCE(shop.slug, ''),
 	COALESCE(rt.rating, 0) AS rating, COALESCE(rt.review_count, 0) AS review_count,
 	COALESCE(sl.units, 0) AS sales_units,
 	(p.created_at > NOW() - INTERVAL '21 days') AS is_new,
@@ -203,7 +212,8 @@ func (r *Repository) RelatedProducts(ctx context.Context, slug string, limit int
 // ListCategories returns active categories with their live product counts.
 func (r *Repository) ListCategories(ctx context.Context) ([]CategoryRecord, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT c.id, c.slug, c.name, COALESCE(c.description, ''), COALESCE(c.image_url, ''), count(p.id)::bigint
+		SELECT c.id, c.slug, c.name, COALESCE(c.description, ''), COALESCE(c.image_url, ''),
+		       count(p.id)::bigint, c.updated_at
 		FROM categories c
 		LEFT JOIN product_categories pc ON pc.category_id = c.id
 		LEFT JOIN products p ON p.id = pc.product_id AND `+liveProducts+`
@@ -218,7 +228,7 @@ func (r *Repository) ListCategories(ctx context.Context) ([]CategoryRecord, erro
 	records := make([]CategoryRecord, 0)
 	for rows.Next() {
 		var rec CategoryRecord
-		if err := rows.Scan(&rec.ID, &rec.Slug, &rec.Name, &rec.Description, &rec.ImageURL, &rec.ProductCount); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Slug, &rec.Name, &rec.Description, &rec.ImageURL, &rec.ProductCount, &rec.UpdatedAt); err != nil {
 			return nil, apperr.ErrInternal.WithCause(err)
 		}
 		records = append(records, rec)
@@ -229,9 +239,68 @@ func (r *Repository) ListCategories(ctx context.Context) ([]CategoryRecord, erro
 	return records, nil
 }
 
+// StoreBySlug returns one active store with its public aggregates. Positive
+// feedback is the share of published reviews rated 4 or 5 stars.
+func (r *Repository) StoreBySlug(ctx context.Context, slug string) (StoreRecord, error) {
+	var rec StoreRecord
+	err := r.db.QueryRow(ctx, `
+		SELECT s.id, s.name, s.slug, COALESCE(s.description, ''),
+		       COALESCE(s.logo_url, ''), COALESCE(s.banner_url, ''), COALESCE(c.name, ''),
+		       (SELECT count(*) FROM products p
+		        WHERE p.vendor_id = s.vendor_id AND `+liveProducts+`)::bigint,
+		       (SELECT count(*) FROM store_followers f WHERE f.store_id = s.id)::bigint,
+		       (SELECT count(*) FROM reviews r
+		        JOIN products p2 ON p2.id = r.product_id
+		        WHERE p2.vendor_id = s.vendor_id AND r.status = 'published')::bigint,
+		       (SELECT count(*) FROM reviews r
+		        JOIN products p3 ON p3.id = r.product_id
+		        WHERE p3.vendor_id = s.vendor_id AND r.status = 'published' AND r.rating >= 4)::bigint,
+		       s.updated_at
+		FROM stores s
+		LEFT JOIN categories c ON c.id = s.category_id
+		WHERE s.slug = $1 AND s.status = 'active'`, slug,
+	).Scan(&rec.ID, &rec.Name, &rec.Slug, &rec.Description, &rec.LogoURL, &rec.BannerURL,
+		&rec.Category, &rec.ProductCount, &rec.FollowerCount, &rec.ReviewCount, &rec.PositiveCount,
+		&rec.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return StoreRecord{}, errStoreNotFound
+	}
+	if err != nil {
+		return StoreRecord{}, apperr.ErrInternal.WithCause(err)
+	}
+	return rec, nil
+}
+
+// StoreProducts returns one page of an active store's live products.
+func (r *Repository) StoreProducts(ctx context.Context, slug string, q ListQuery) ([]ProductRecord, int64, error) {
+	where := " WHERE shop.slug = $1 AND " + liveProducts
+
+	var total int64
+	if err := r.db.QueryRow(ctx, "SELECT count(*) "+catalogFrom+where, slug).Scan(&total); err != nil {
+		return nil, 0, apperr.ErrInternal.WithCause(err)
+	}
+	if total == 0 {
+		return []ProductRecord{}, 0, nil
+	}
+
+	rows, err := r.db.Query(ctx, "SELECT "+catalogColumns+catalogFrom+where+orderBy(q.Sort)+
+		" LIMIT $2 OFFSET $3", slug, q.Limit, (q.Page-1)*q.Limit)
+	if err != nil {
+		return nil, 0, apperr.ErrInternal.WithCause(err)
+	}
+	defer rows.Close()
+
+	records, err := collectProducts(rows, q.Limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	return records, total, nil
+}
+
 const reviewColumns = `
 	r.id, r.product_id, p.name, p.slug,
 	COALESCE(NULLIF(TRIM(CONCAT_WS(' ', up.first_name, up.last_name)), ''), split_part(u.email, '@', 1)),
+	COALESCE(up.avatar_url, ''),
 	r.rating, COALESCE(r.title, ''), r.content,
 	(r.order_item_id IS NOT NULL) AS verified,
 	COALESCE(v.helpful, 0)::bigint, COALESCE(r.vendor_reply, ''), r.vendor_replied_at, r.created_at`
@@ -275,7 +344,50 @@ func (r *Repository) ProductReviews(ctx context.Context, slug string, page, limi
 	if err != nil {
 		return nil, 0, err
 	}
+	if err := r.attachReviewImages(ctx, records); err != nil {
+		return nil, 0, err
+	}
 	return records, total, nil
+}
+
+// attachReviewImages groups each review's photo URLs onto the records.
+func (r *Repository) attachReviewImages(ctx context.Context, records []ReviewRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(records))
+	for _, rec := range records {
+		ids = append(ids, rec.ID)
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT review_id, image_url FROM review_images
+		WHERE review_id::text = ANY(string_to_array($1, ','))
+		ORDER BY review_id, sort_order`, strings.Join(ids, ","))
+	if err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+	defer rows.Close()
+
+	byReview := make(map[string][]string, len(ids))
+	for rows.Next() {
+		var (
+			reviewID string
+			url      string
+		)
+		if err := rows.Scan(&reviewID, &url); err != nil {
+			return apperr.ErrInternal.WithCause(err)
+		}
+		byReview[reviewID] = append(byReview[reviewID], url)
+	}
+	if err := rows.Err(); err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+	for i := range records {
+		if images, ok := byReview[records[i].ID]; ok {
+			records[i].Images = images
+		}
+	}
+	return nil
 }
 
 // ProductRating aggregates a product's published reviews into a 1..5 star
@@ -419,7 +531,15 @@ func (r *Repository) TopReviews(ctx context.Context, limit int) ([]ReviewRecord,
 		return nil, apperr.ErrInternal.WithCause(err)
 	}
 	defer rows.Close()
-	return collectReviews(rows, limit)
+
+	records, err := collectReviews(rows, limit)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.attachReviewImages(ctx, records); err != nil {
+		return nil, err
+	}
+	return records, nil
 }
 
 func scanProduct(s scanner) (ProductRecord, error) {
@@ -431,6 +551,7 @@ func scanProduct(s scanner) (ProductRecord, error) {
 		&rec.ID, &rec.Slug, &rec.Name, &rec.ShortDescription, &rec.Description,
 		&rec.Price, &rec.CompareAtPrice, &rec.SKU, &rec.Stock, &rec.ImageURL, &rec.ImageAlt,
 		&rec.Category, &rec.CategorySlug, &rec.Brand,
+		&rec.StoreName, &rec.StoreSlug,
 		&rec.Rating, &rec.ReviewCount, &rec.SalesUnits, &rec.IsNew,
 		&rawAttrs, &rec.SeoTitle, &rec.SeoDescription, &rec.CreatedAt, &rec.UpdatedAt,
 	)
@@ -464,7 +585,7 @@ func collectReviews(rows pgx.Rows, limit int) ([]ReviewRecord, error) {
 	for rows.Next() {
 		var rec ReviewRecord
 		if err := rows.Scan(
-			&rec.ID, &rec.ProductID, &rec.ProductName, &rec.ProductSlug, &rec.Author,
+			&rec.ID, &rec.ProductID, &rec.ProductName, &rec.ProductSlug, &rec.Author, &rec.AvatarURL,
 			&rec.Rating, &rec.Title, &rec.Comment, &rec.VerifiedPurchase, &rec.HelpfulCount,
 			&rec.VendorReply, &rec.VendorRepliedAt, &rec.CreatedAt,
 		); err != nil {

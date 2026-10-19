@@ -56,6 +56,34 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	}
 }
 
+func TestLoad_RequiresSecureForSameSiteNone(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost:5432/db")
+	t.Setenv("JWT_ACCESS_SECRET", "access-secret")
+	t.Setenv("JWT_REFRESH_SECRET", "refresh-secret")
+	t.Setenv("COOKIE_SAMESITE", "none")
+	t.Setenv("COOKIE_SECURE", "false")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error when COOKIE_SAMESITE=none without COOKIE_SECURE")
+	}
+}
+
+func TestLoad_AllowsSameSiteNoneWithSecure(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost:5432/db")
+	t.Setenv("JWT_ACCESS_SECRET", "access-secret")
+	t.Setenv("JWT_REFRESH_SECRET", "refresh-secret")
+	t.Setenv("COOKIE_SAMESITE", "none")
+	t.Setenv("COOKIE_SECURE", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Auth.CookieSameSite != "none" {
+		t.Errorf("expected CookieSameSite none, got %q", cfg.Auth.CookieSameSite)
+	}
+}
+
 func TestLoad_ParsesOverrides(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost:5432/db")
 	t.Setenv("JWT_ACCESS_SECRET", "access-secret")

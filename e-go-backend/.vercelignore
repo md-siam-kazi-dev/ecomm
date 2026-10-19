@@ -1,0 +1,20 @@
+# Secrets — never upload local env files; set them in the Vercel dashboard.
+.env
+.env.*
+!.env.example
+
+# Build / test artifacts
+/bin/
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Dev-only tooling, not needed for the build or runtime
+.commandcode/
+.agents/
+tests/
+docs/
+Makefile
+*.md

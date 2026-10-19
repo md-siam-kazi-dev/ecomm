@@ -119,6 +119,7 @@ type OrderItemReview struct {
 	Rating    int
 	Title     string
 	Comment   string
+	Images    []string
 	CreatedAt time.Time
 }
 

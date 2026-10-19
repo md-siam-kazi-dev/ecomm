@@ -66,13 +66,19 @@ func (h *ProductHandler) Approve(w http.ResponseWriter, r *http.Request) {
 
 // Reject handles POST /api/v1/admin/products/{id}/reject.
 func (h *ProductHandler) Reject(w http.ResponseWriter, r *http.Request) {
+	identity, ok := auth.IdentityFromContext(r.Context())
+	if !ok {
+		response.Error(w, r, apperr.ErrUnauthorized)
+		return
+	}
+
 	var req ReviewDecisionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, r, errInvalidBody.WithCause(err))
 		return
 	}
 
-	if err := h.svc.Reject(r.Context(), chi.URLParam(r, "id"), req.Reason); err != nil {
+	if err := h.svc.Reject(r.Context(), identity.UserID, chi.URLParam(r, "id"), req.Reason); err != nil {
 		response.Error(w, r, err)
 		return
 	}
@@ -81,13 +87,19 @@ func (h *ProductHandler) Reject(w http.ResponseWriter, r *http.Request) {
 
 // RequestChanges handles POST /api/v1/admin/products/{id}/changes.
 func (h *ProductHandler) RequestChanges(w http.ResponseWriter, r *http.Request) {
+	identity, ok := auth.IdentityFromContext(r.Context())
+	if !ok {
+		response.Error(w, r, apperr.ErrUnauthorized)
+		return
+	}
+
 	var req ReviewDecisionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, r, errInvalidBody.WithCause(err))
 		return
 	}
 
-	if err := h.svc.RequestChanges(r.Context(), chi.URLParam(r, "id"), req.Note); err != nil {
+	if err := h.svc.RequestChanges(r.Context(), identity.UserID, chi.URLParam(r, "id"), req.Note); err != nil {
 		response.Error(w, r, err)
 		return
 	}

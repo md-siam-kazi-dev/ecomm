@@ -187,7 +187,7 @@ func (r *Repository) GetProduct(ctx context.Context, vendorID, productID string)
 		SELECT p.id, p.name, p.slug, COALESCE(p.description, ''), COALESCE(p.short_description, ''),
 		       p.status::text, p.approval_status::text,
 		       COALESCE(c.name, ''), COALESCE(b.name, ''),
-		       COALESCE(p.review_note, ''), p.submitted_at, p.approved_at, p.created_at,
+		       COALESCE(p.review_note, ''), p.submitted_at, p.approved_at, p.reviewed_at, p.created_at,
 		       COALESCE(p.attributes, '{}'::jsonb)
 		FROM products p
 		LEFT JOIN brands b ON b.id = p.brand_id
@@ -198,7 +198,7 @@ func (r *Repository) GetProduct(ctx context.Context, vendorID, productID string)
 	`, productID, vendorID).Scan(
 		&d.ID, &d.Name, &d.Slug, &d.Description, &d.ShortDescription,
 		&d.Status, &d.ApprovalStatus, &d.Category, &d.Brand,
-		&d.ReviewNote, &d.SubmittedAt, &d.ApprovedAt, &d.CreatedAt, &rawAttrs,
+		&d.ReviewNote, &d.SubmittedAt, &d.ApprovedAt, &d.ReviewedAt, &d.CreatedAt, &rawAttrs,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ProductDetail{}, errProductNotFound
@@ -364,8 +364,9 @@ func setStock(ctx context.Context, tx pgx.Tx, variantID, locationID string, quan
 		}
 		if quantity > 0 {
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO inventory_movements (variant_id, location_id, movement_type, quantity, notes)
-				VALUES ($1, $2, 'restock', $3, 'Initial stock')
+				INSERT INTO inventory_movements
+					(variant_id, location_id, movement_type, quantity, quantity_before, quantity_after, notes)
+				VALUES ($1, $2, 'restock', $3, 0, $3, 'Initial stock')
 			`, variantID, locationID, quantity); err != nil {
 				return apperr.ErrInternal.WithCause(err)
 			}

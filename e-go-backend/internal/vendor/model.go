@@ -33,6 +33,7 @@ type ProductRecord struct {
 	Stock          int64
 	ImageURL       string
 	SubmittedAt    *time.Time
+	ReviewedAt     *time.Time
 	CreatedAt      time.Time
 }
 
@@ -66,6 +67,7 @@ type ProductDetail struct {
 	VendorName       string
 	SubmittedAt      *time.Time
 	ApprovedAt       *time.Time
+	ReviewedAt       *time.Time
 	CreatedAt        time.Time
 }
 
@@ -109,4 +111,60 @@ type InventoryRecord struct {
 	Quantity     int64
 	Reserved     int64
 	ReorderLevel int64
+}
+
+// InventoryMovementRecord is one entry in the vendor's stock history.
+type InventoryMovementRecord struct {
+	ID             string
+	VariantID      string
+	ProductID      string
+	Name           string
+	SKU            string
+	MovementType   string
+	Quantity       int64
+	QuantityBefore *int64
+	QuantityAfter  *int64
+	Notes          string
+	ReferenceType  string
+	OrderNumber    string
+	Actor          string
+	CreatedAt      time.Time
+}
+
+// ExportQuery filters an export. Zero From/To mean "unbounded".
+type ExportQuery struct {
+	Status string
+	From   time.Time
+	To     time.Time
+}
+
+// ExportOrderRow is one order-item line in the orders export (one row per item).
+type ExportOrderRow struct {
+	OrderNumber       string
+	OrderDate         time.Time
+	ProductName       string
+	SKU               string
+	Quantity          int
+	UnitPrice         float64
+	Discount          float64
+	LineTotal         float64
+	PaymentStatus     string
+	FulfillmentStatus string
+	TrackingNumber    string
+	Currency          string
+}
+
+// ExportInventoryRow is one variant line in the inventory export.
+type ExportInventoryRow struct {
+	ProductID      string
+	Name           string
+	SKU            string
+	Price          float64
+	CostPrice      *float64
+	Quantity       int64
+	Reserved       int64
+	ReorderLevel   int64
+	ProductStatus  string
+	ApprovalStatus string
+	UpdatedAt      *time.Time
 }

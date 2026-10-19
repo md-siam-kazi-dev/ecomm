@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/md-siam-kazi/e-go-backend/internal/audit"
 	"github.com/md-siam-kazi/e-go-backend/internal/config"
 	"github.com/md-siam-kazi/e-go-backend/pkg/jwt"
 	"github.com/md-siam-kazi/e-go-backend/pkg/middleware"
@@ -40,6 +41,7 @@ func Register(r chi.Router, d Deps) {
 		RefreshTTL: d.Cfg.JWT.RefreshTTL,
 	})
 	h := NewHandler(svc, d.Cfg.Auth, d.Cfg.JWT.AccessTTL, d.Cfg.JWT.RefreshTTL)
+	h.audit = audit.NewRecorder(d.DB)
 
 	mount(r, h, signer, ratelimit.New(d.Redis))
 }

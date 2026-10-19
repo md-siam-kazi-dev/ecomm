@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -85,7 +86,50 @@ func (r *Repository) ListReviews(ctx context.Context, vendorID string, q ListQue
 	if err := rows.Err(); err != nil {
 		return nil, 0, apperr.ErrInternal.WithCause(err)
 	}
+	if err := r.attachReviewImages(ctx, records); err != nil {
+		return nil, 0, err
+	}
 	return records, total, nil
+}
+
+// attachReviewImages groups each review's photo URLs onto the records.
+func (r *Repository) attachReviewImages(ctx context.Context, records []VendorReviewRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(records))
+	for _, rec := range records {
+		ids = append(ids, rec.ID)
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT review_id, image_url FROM review_images
+		WHERE review_id::text = ANY(string_to_array($1, ','))
+		ORDER BY review_id, sort_order`, strings.Join(ids, ","))
+	if err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+	defer rows.Close()
+
+	byReview := make(map[string][]string, len(ids))
+	for rows.Next() {
+		var (
+			reviewID string
+			url      string
+		)
+		if err := rows.Scan(&reviewID, &url); err != nil {
+			return apperr.ErrInternal.WithCause(err)
+		}
+		byReview[reviewID] = append(byReview[reviewID], url)
+	}
+	if err := rows.Err(); err != nil {
+		return apperr.ErrInternal.WithCause(err)
+	}
+	for i := range records {
+		if images, ok := byReview[records[i].ID]; ok {
+			records[i].Images = images
+		}
+	}
+	return nil
 }
 
 // ReviewSummary aggregates the vendor's star feedback and reply backlog.
@@ -135,7 +179,7 @@ func (r *Repository) ReplyToReview(ctx context.Context, vendorID, reviewID, repl
 	return r.reviewByID(ctx, vendorID, reviewID)
 }
 
-// reviewByID loads one review scoped to the vendor's products.
+// reviewByID loads one review (plus its photos) scoped to the vendor's products.
 func (r *Repository) reviewByID(ctx context.Context, vendorID, reviewID string) (VendorReviewRecord, error) {
 	rec, err := scanVendorReview(r.db.QueryRow(ctx,
 		"SELECT "+vendorReviewColumns+vendorReviewFrom+" WHERE r.id = $2", vendorID, reviewID))
@@ -145,5 +189,9 @@ func (r *Repository) reviewByID(ctx context.Context, vendorID, reviewID string) 
 	if err != nil {
 		return VendorReviewRecord{}, apperr.ErrInternal.WithCause(err)
 	}
-	return rec, nil
+	records := []VendorReviewRecord{rec}
+	if err := r.attachReviewImages(ctx, records); err != nil {
+		return VendorReviewRecord{}, err
+	}
+	return records[0], nil
 }

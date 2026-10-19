@@ -27,12 +27,7 @@ type Identity struct {
 func Authenticate(signer *jwt.Signer) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token := bearerToken(r)
-			if token == "" {
-				if cookie, err := r.Cookie(accessCookieName); err == nil {
-					token = cookie.Value
-				}
-			}
+			token := accessToken(r)
 			if token == "" {
 				response.Error(w, r, apperr.ErrUnauthorized)
 				return
@@ -41,6 +36,33 @@ func Authenticate(signer *jwt.Signer) func(http.Handler) http.Handler {
 			claims, err := signer.Parse(token)
 			if err != nil {
 				response.Error(w, r, apperr.ErrUnauthorized)
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), identityKey, Identity{
+				UserID: claims.Subject,
+				Role:   claims.Role,
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// OptionalAuthenticate is like Authenticate but never rejects: a missing or
+// invalid token leaves the request unauthenticated. Use it on public endpoints
+// that enrich their response when the caller happens to be signed in.
+func OptionalAuthenticate(signer *jwt.Signer) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token := accessToken(r)
+			if token == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			claims, err := signer.Parse(token)
+			if err != nil {
+				next.ServeHTTP(w, r)
 				return
 			}
 
@@ -96,6 +118,18 @@ func RequireRole(checker RoleChecker, roles ...string) func(http.Handler) http.H
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	identity, ok := ctx.Value(identityKey).(Identity)
 	return identity, ok
+}
+
+// accessToken reads the caller's access token from the Authorization header,
+// falling back to the access_token cookie.
+func accessToken(r *http.Request) string {
+	if token := bearerToken(r); token != "" {
+		return token
+	}
+	if cookie, err := r.Cookie(accessCookieName); err == nil {
+		return cookie.Value
+	}
+	return ""
 }
 
 func bearerToken(r *http.Request) string {
