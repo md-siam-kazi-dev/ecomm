@@ -82,3 +82,4 @@ rea, wants it to mirror the structure and quality of the existing analogous area
 - Expects spreadsheet/CSV exports to defend against formula injection (neutralizing cells that begin with `=`, `+`, `-` or `@`). Confidence: 0.5
 - When a third-party integration has no credentials/configuration yet, expects an honest, documented integration boundary (provider interface + setup docs) rather than a pretended-working connection. Confidence: 0.5
 - Keeps financial concepts distinct (gross sales, discounts, refunds, marketplace commission, vendor earnings, pending vs available payout) and never recalculates historical settlements using newly changed commission rules. Confidence: 0.45
+- Wants user-facing UI assembled from the design-system components (shadcn/ui primitives + ReactBits items) rather than hand-rolled markup and bespoke styles — for a dashboard refresh they explicitly required that "all components come from shadcn and ReactBits". Confidence: 0.6
