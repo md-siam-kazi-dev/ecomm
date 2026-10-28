@@ -32,6 +32,10 @@ func (s *Server) buildRouter() chi.Router {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
+	// Resolve the caller address once, trusting forwarded headers only from
+	// configured proxies, so the audit trail, rate limiter and security monitor
+	// all see the same unspoofable value.
+	r.Use(middleware.ResolveClientIP(s.cfg.TrustedProxies))
 	// Capture request metadata (IP, user agent, request id) for the audit trail.
 	r.Use(audit.Middleware)
 	r.Use(middleware.Logger(s.log))

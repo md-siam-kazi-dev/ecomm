@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"slices"
 	"strconv"
@@ -20,6 +21,11 @@ type Config struct {
 	Payment  PaymentConfig
 	Order    OrderConfig
 	Log      LogConfig
+
+	// TrustedProxies is the parsed form of App.TrustedProxyCIDRs. Forwarded
+	// client-IP headers are only honoured when the immediate peer is inside one
+	// of these prefixes; otherwise the socket address is authoritative.
+	TrustedProxies []netip.Prefix
 }
 
 // OrderConfig holds storefront order pricing (flat rates, no per-product tax).
@@ -82,6 +88,9 @@ type AppConfig struct {
 	IdleTimeout         time.Duration
 	ShutdownTimeout     time.Duration
 	MaxRequestBodyBytes int64
+	// TrustedProxyCIDRs lists the reverse proxies whose forwarded client-IP
+	// headers are believed (TRUSTED_PROXY_CIDRS). Empty means "trust nothing".
+	TrustedProxyCIDRs []string
 }
 
 type DatabaseConfig struct {
@@ -134,6 +143,7 @@ func Load() (*Config, error) {
 			IdleTimeout:         getEnvDuration("APP_IDLE_TIMEOUT", 60*time.Second),
 			ShutdownTimeout:     getEnvDuration("APP_SHUTDOWN_TIMEOUT", 10*time.Second),
 			MaxRequestBodyBytes: getEnvInt64("APP_MAX_REQUEST_BODY_BYTES", 1<<20),
+			TrustedProxyCIDRs:   getEnvSlice("TRUSTED_PROXY_CIDRS", nil),
 		},
 		Database: DatabaseConfig{
 			URL:             getEnv("DATABASE_URL", ""),
@@ -197,6 +207,12 @@ func Load() (*Config, error) {
 		cfg.CORS.AllowedOrigins = append(cfg.CORS.AllowedOrigins, cfg.Auth.FrontendURL)
 	}
 
+	proxies, err := parsePrefixes(cfg.App.TrustedProxyCIDRs)
+	if err != nil {
+		return nil, err
+	}
+	cfg.TrustedProxies = proxies
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -237,6 +253,31 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
+}
+
+// parsePrefixes parses CIDR strings. A bare address is accepted as a
+// single-host prefix (/32, /128) so one proxy can be allow-listed without
+// spelling out the mask. Malformed entries fail loudly: a typo must not
+// silently narrow (or widen) proxy trust.
+func parsePrefixes(values []string) ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(values))
+	for _, raw := range values {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(entry); err == nil {
+			out = append(out, prefix.Masked())
+			continue
+		}
+		addr, addrErr := netip.ParseAddr(entry)
+		if addrErr != nil {
+			return nil, fmt.Errorf("config: invalid TRUSTED_PROXY_CIDRS entry %q: expected a CIDR or IP address", entry)
+		}
+		addr = addr.Unmap()
+		out = append(out, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return out, nil
 }
 
 func getEnv(key, fallback string) string {

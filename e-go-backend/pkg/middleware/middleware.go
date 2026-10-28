@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -21,7 +22,10 @@ var errInternalPanic = apperr.New(http.StatusInternalServerError, "INTERNAL_ERRO
 
 type ctxKey int
 
-const requestIDKey ctxKey = iota
+const (
+	requestIDKey ctxKey = iota
+	clientIPKey
+)
 
 // RequestID attaches a request ID to the context and echoes it back in the
 // X-Request-Id response header.
@@ -144,22 +148,99 @@ func SecureHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// ClientIP extracts the best-effort client IP, honouring the usual proxy
-// headers before falling back to the socket address.
+// ResolveClientIP resolves the caller address once per request and stores it in
+// the context, so the audit trail, the rate limiter and the security monitor
+// all agree on the same value. It must run after RequestID.
+//
+// Forwarded headers (X-Forwarded-For, X-Real-IP) are honoured only when the
+// immediate peer is inside the trusted-proxy prefixes. An untrusted client can
+// therefore no longer forge its address by setting those headers.
+func ResolveClientIP(trusted []netip.Prefix) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := resolveClientIP(trusted, r)
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), clientIPKey, ip)))
+		})
+	}
+}
+
+// ClientIPFromContext returns the address resolved by ResolveClientIP.
+func ClientIPFromContext(ctx context.Context) (string, bool) {
+	ip, ok := ctx.Value(clientIPKey).(string)
+	return ip, ok && ip != ""
+}
+
+// ClientIP returns the caller's address: the value resolved by ResolveClientIP
+// when that middleware ran, otherwise the socket address. Forwarded headers are
+// never trusted without that middleware, so a direct call cannot be spoofed.
 func ClientIP(r *http.Request) string {
+	if ip, ok := ClientIPFromContext(r.Context()); ok {
+		return ip
+	}
+	return resolveClientIP(nil, r)
+}
+
+// resolveClientIP implements the trusted-proxy walk. When the peer is trusted,
+// X-Forwarded-For is read right-to-left and the first address that is not itself
+// a trusted proxy wins. The left-most value is client-controlled and is
+// deliberately ignored.
+func resolveClientIP(trusted []netip.Prefix, r *http.Request) string {
+	peer := normalizeIP(r.RemoteAddr)
+	if !isTrustedPeer(peer, trusted) {
+		return peer
+	}
+
 	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		if first, _, found := strings.Cut(forwarded, ","); found || first != "" {
-			return strings.TrimSpace(first)
+		hops := strings.Split(forwarded, ",")
+		for i := len(hops) - 1; i >= 0; i-- {
+			hop := normalizeIP(hops[i])
+			if hop == "" || isTrustedPeer(hop, trusted) {
+				continue
+			}
+			return hop
 		}
 	}
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+
+	if realIP := normalizeIP(r.Header.Get("X-Real-IP")); realIP != "" {
 		return realIP
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+
+	return peer
+}
+
+// normalizeIP parses a bare address or host:port and returns a canonical string,
+// or "" when the value is unusable. IPv4-mapped IPv6 addresses are unmapped so
+// IPv4 prefixes match them.
+func normalizeIP(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
 	}
-	return host
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	addr, err := netip.ParseAddr(strings.Trim(value, "[]"))
+	if err != nil {
+		return ""
+	}
+	return addr.Unmap().String()
+}
+
+func isTrustedPeer(ip string, prefixes []netip.Prefix) bool {
+	if len(prefixes) == 0 || ip == "" {
+		return false
+	}
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, prefix := range prefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // RateKey builds a limiter key function scoped to a route name and the client

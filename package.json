@@ -3,7 +3,8 @@
     "@animate-ui/react": "^2.2.1",
     "@neon/config": "^1.8.5",
     "@neon/env": "^1.5.2",
-    "motion": "^14.6.0"
+    "motion": "^14.6.0",
+    "vercel": "^65.4.0"
   },
   "devDependencies": {
     "shadcn": "^4.22.1"
